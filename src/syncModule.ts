@@ -21,7 +21,7 @@ export class TodoistSync {
 		const currentFileValue = await this.app.vault.read(file);
 		const regexTags = /#tdsync/gm;
 		const regexLinks =
-			/%% \[tid::\(\d+\)\[(?:https:\/\/app.todoist.com\/app\/task\/[a-zA-Z0-9]+|todoist:\/\/task\?id=[a-zA-Z0-9]+)\]%%/g;
+			/%%\[tid:: \[[a-zA-Z0-9]+\]\((?:https:\/\/app\.todoist\.com\/app\/task\/[a-zA-Z0-9]+|todoist:\/\/task\?id=[a-zA-Z0-9]+)\)\]%%/g;
 
 		const countTags = currentFileValue?.match(regexTags);
 		const countLinks = currentFileValue?.match(regexLinks);
