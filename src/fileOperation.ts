@@ -114,7 +114,9 @@ export class FileOperation {
 				!this.plugin.taskParser?.hasTodoistId(line) &&
 				!this.plugin.taskParser?.hasTodoistTag(line)
 			) {
-				const newLine = this.plugin.taskParser?.addTodoistTag(line);
+				let newLine = this.plugin.taskParser?.addTodoistTag(line);
+				// Also add frontmatter labels as hashtags
+				newLine = this.plugin.taskParser?.addFrontmatterLabelsToTaskLine(newLine, filepath);
 				lines[i] = newLine;
 				modified = true;
 			}
