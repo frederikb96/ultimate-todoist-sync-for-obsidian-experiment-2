@@ -1064,93 +1064,68 @@ export class TaskParser {
 	}
 
 	// Get labels from file frontmatter todoist-labels field
-	getFrontmatterLabels(filepath: string): string[] {
+	// Generic helper to read frontmatter field from file
+	private getFrontmatterField(filepath: string, fieldName: string): any {
 		try {
-			// Get file from vault
 			const file = this.app.vault.getAbstractFileByPath(filepath);
-			if (!file) {
-				return [];
+			if (!file || !(file instanceof TFile)) {
+				return null;
 			}
 
-			// Ensure it's a TFile (not a folder)
-			if (!(file instanceof TFile)) {
-				return [];
-			}
-
-			// Read frontmatter from metadata cache
 			const cache = this.app.metadataCache.getFileCache(file);
 			if (!cache || !cache.frontmatter) {
-				return [];
+				return null;
 			}
 
-			// Extract todoist-labels field
-			const todoistLabels = cache.frontmatter["todoist-labels"];
-			if (!todoistLabels) {
-				return [];
-			}
-
-			// Normalize to array format
-			if (Array.isArray(todoistLabels)) {
-				// Filter out non-string values, trim whitespace, and remove empty strings
-				return todoistLabels
-					.filter(tag => typeof tag === "string")
-					.map(tag => tag.trim())
-					.filter(tag => tag.length > 0);
-			} else if (typeof todoistLabels === "string") {
-				// Single string value, trim and wrap in array
-				const trimmed = todoistLabels.trim();
-				return trimmed.length > 0 ? [trimmed] : [];
-			}
-
-			// Invalid format (number, object, etc.) - return empty
-			return [];
+			return cache.frontmatter[fieldName] ?? null;
 		} catch (error) {
-			// If any error reading frontmatter, fail gracefully
 			if (this.plugin.settings.debugMode) {
-				console.error(`Error reading frontmatter labels from ${filepath}:`, error);
+				console.error(`Error reading frontmatter field '${fieldName}' from ${filepath}:`, error);
 			}
+			return null;
+		}
+	}
+
+	getFrontmatterLabels(filepath: string): string[] {
+		const todoistLabels = this.getFrontmatterField(filepath, "todoist-labels");
+		if (!todoistLabels) {
 			return [];
 		}
+
+		// Normalize to array format
+		if (Array.isArray(todoistLabels)) {
+			// Filter out non-string values, trim whitespace, and remove empty strings
+			return todoistLabels
+				.filter(tag => typeof tag === "string")
+				.map(tag => tag.trim())
+				.filter(tag => tag.length > 0);
+		} else if (typeof todoistLabels === "string") {
+			// Single string value, trim and wrap in array
+			const trimmed = todoistLabels.trim();
+			return trimmed.length > 0 ? [trimmed] : [];
+		}
+
+		// Invalid format (number, object, etc.) - return empty
+		return [];
 	}
 
 	// Check if auto-sync should be enabled for this file
 	shouldAutoSyncFile(filepath: string): boolean {
-		try {
-			// Get file from vault
-			const file = this.app.vault.getAbstractFileByPath(filepath);
-			if (!file || !(file instanceof TFile)) {
-				// If file not found, fall back to global setting
-				return this.plugin.settings.enableFullVaultSync;
-			}
+		const autoSync = this.getFrontmatterField(filepath, "todoist-auto-sync");
 
-			// Read frontmatter from metadata cache
-			const cache = this.app.metadataCache.getFileCache(file);
-			if (!cache || !cache.frontmatter) {
-				// No frontmatter, use global setting
-				return this.plugin.settings.enableFullVaultSync;
-			}
-
-			// Check if todoist-auto-sync is explicitly set in frontmatter
-			const autoSync = cache.frontmatter["todoist-auto-sync"];
-			if (autoSync !== undefined) {
-				// Frontmatter value is set, use it (true or false)
-				return autoSync === true;
-			}
-
-			// Not set in frontmatter, fall back to global setting
-			return this.plugin.settings.enableFullVaultSync;
-		} catch (error) {
-			// On error, fall back to global setting
-			if (this.plugin.settings.debugMode) {
-				console.error(`Error checking auto-sync for ${filepath}:`, error);
-			}
-			return this.plugin.settings.enableFullVaultSync;
+		// If frontmatter field is set (true or false), use that value
+		if (autoSync !== null && autoSync !== undefined) {
+			return autoSync === true;
 		}
+
+		// Not set in frontmatter, fall back to global setting
+		return this.plugin.settings.enableFullVaultSync;
 	}
 
 	// Add frontmatter labels as hashtags to task line in Obsidian
-	addFrontmatterLabelsToTaskLine(lineText: string, filepath: string): string {
-		const frontmatterLabels = this.getFrontmatterLabels(filepath);
+	// Optional labels parameter for performance: pass pre-fetched labels to avoid repeated reads
+	addFrontmatterLabelsToTaskLine(lineText: string, filepath: string, labels?: string[]): string {
+		const frontmatterLabels = labels ?? this.getFrontmatterLabels(filepath);
 		if (frontmatterLabels.length === 0) {
 			return lineText;
 		}

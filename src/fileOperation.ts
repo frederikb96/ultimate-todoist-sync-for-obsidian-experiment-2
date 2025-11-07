@@ -101,6 +101,9 @@ export class FileOperation {
 		const lines = content.split("\n");
 		let modified = false;
 
+		// Read frontmatter labels once for performance (not in loop)
+		const frontmatterLabels = this.plugin.taskParser?.getFrontmatterLabels(filepath) ?? [];
+
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
 			if (!this.plugin.taskParser?.isMarkdownTask(line)) {
@@ -115,8 +118,8 @@ export class FileOperation {
 				!this.plugin.taskParser?.hasTodoistTag(line)
 			) {
 				let newLine = this.plugin.taskParser?.addTodoistTag(line);
-				// Also add frontmatter labels as hashtags
-				newLine = this.plugin.taskParser?.addFrontmatterLabelsToTaskLine(newLine, filepath);
+				// Also add frontmatter labels as hashtags (pass pre-fetched labels for performance)
+				newLine = this.plugin.taskParser?.addFrontmatterLabelsToTaskLine(newLine, filepath, frontmatterLabels);
 				lines[i] = newLine;
 				modified = true;
 			}
