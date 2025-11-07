@@ -340,7 +340,6 @@ export class AnotherSimpleTodoistSyncPluginSettingTab extends PluginSettingTab {
 					try {
 						new Notice("Starting sync with Todoist...");
 						await this.plugin.scheduledSynchronization();
-						this.plugin.syncLock = false;
 						new Notice("Sync with Todoist completed.");
 					} catch (error) {
 						new Notice(`An error occurred while syncing.:${error}`);

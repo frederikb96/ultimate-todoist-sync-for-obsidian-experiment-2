@@ -324,7 +324,6 @@ export default class AnotherSimpleTodoistSync extends Plugin {
 					try {
 						new Notice("Starting sync with Todoist...");
 						await this.scheduledSynchronization();
-						this.syncLock = false;
 						new Notice("Sync with Todoist completed.");
 					} catch (error) {
 						new Notice(`An error occurred while syncing.:${error}`);

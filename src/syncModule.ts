@@ -14,22 +14,27 @@ export class TodoistSync {
 
 	// Check if the file has "tasks" without links
 	async checkForTasksWithoutLink(filepath: string): Promise<boolean> {
-		const file = this.app.vault.getAbstractFileByPath(filepath);
-		if (!file || !(file instanceof TFile)) {
-			return false;
-		}
-		const currentFileValue = await this.app.vault.read(file);
-		const regexTags = /#tdsync/gm;
-		const regexLinks =
-			/%%\[tid:: \[[a-zA-Z0-9]+\]\((?:https:\/\/app\.todoist\.com\/app\/task\/[a-zA-Z0-9]+|todoist:\/\/task\?id=[a-zA-Z0-9]+)\)\]%%/g;
+		try {
+			const file = this.app.vault.getAbstractFileByPath(filepath);
+			if (!file || !(file instanceof TFile)) {
+				return false;
+			}
+			const currentFileValue = await this.app.vault.read(file);
+			const regexTags = /#tdsync/gm;
+			const regexLinks =
+				/%%\[tid:: \[[a-zA-Z0-9]+\]\((?:https:\/\/app\.todoist\.com\/app\/task\/[a-zA-Z0-9]+|todoist:\/\/task\?id=[a-zA-Z0-9]+)\)\]%%/g;
 
-		const countTags = currentFileValue?.match(regexTags);
-		const countLinks = currentFileValue?.match(regexLinks);
+			const countTags = currentFileValue?.match(regexTags);
+			const countLinks = currentFileValue?.match(regexLinks);
 
-		if (countLinks?.length === countTags?.length) {
-			return false;
+			if (countLinks?.length === countTags?.length) {
+				return false;
+			}
+			return true;
+		} catch (error) {
+			console.error(`Error checking for tasks without links in ${filepath}:`, error);
+			return false; // Fail gracefully - allow deletion to proceed on error
 		}
-		return true;
 	}
 
 	async deletedTaskCheck(file_path: string): Promise<void> {
