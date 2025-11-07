@@ -1091,8 +1091,8 @@ export class TodoistSync {
 			});
 		}
 		const content = e.extra_data?.content;
-		if (content) {
-			this.plugin.cacheOperation?.modifyTaskToCacheByID(e.object_id, content);
+		if (content && typeof content === 'string') {
+			this.plugin.cacheOperation?.modifyTaskToCacheByID(e.object_id, { content });
 		}
 		if (!e.parent_item_id === null) {
 			new Notice(`The content of Task ${e.parent_item_id} has been modified.`);

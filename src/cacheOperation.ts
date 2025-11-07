@@ -180,8 +180,9 @@ export class CacheOperation {
 			return this.plugin.settings.defaultProjectName;
 		}
 		const defaultProjectId = metadata[filepath].defaultProjectId;
-		const defaultProjectName =
-			this.getProjectNameByIdFromCache(defaultProjectId);
+		const defaultProjectName = defaultProjectId
+			? this.getProjectNameByIdFromCache(defaultProjectId)
+			: undefined;
 		return defaultProjectName;
 	}
 
