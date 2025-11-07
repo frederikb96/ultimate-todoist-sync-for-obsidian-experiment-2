@@ -310,7 +310,7 @@ export default class AnotherSimpleTodoistSync extends Plugin {
 		this.addCommand({
 			id: "asts-trigger-manual-sync",
 			name: "Trigger the Manual Sync",
-			editorCallback: (editor: Editor, view: MarkdownView) => {
+			editorCallback: async (editor: Editor, view: MarkdownView) => {
 				if (!view) {
 					return;
 				}
@@ -322,8 +322,9 @@ export default class AnotherSimpleTodoistSync extends Plugin {
 						return;
 					}
 					try {
-						this.scheduledSynchronization();
+						await this.scheduledSynchronization();
 						this.syncLock = false;
+						new Notice("Sync with Todoist completed.");
 					} catch (error) {
 						new Notice(`An error occurred while syncing.:${error}`);
 						this.syncLock = false;
