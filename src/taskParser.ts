@@ -1,6 +1,6 @@
 import type AnotherSimpleTodoistSync from "../main";
 import type { App } from "obsidian";
-import { Notice } from "obsidian";
+import { Notice, TFile } from "obsidian";
 import type { Task } from "./cacheOperation";
 export class TaskParser {
 	app: App;
@@ -103,6 +103,18 @@ export class TaskParser {
 		}
 
 		const labels = this.getAllTagsFromLineText(textWithoutIndentation);
+
+		// Merge with frontmatter labels if todoist-labels field exists
+		const frontmatterLabels = this.getFrontmatterLabels(filepath);
+		if (frontmatterLabels.length > 0) {
+			// Add frontmatter labels, avoiding duplicates (case-insensitive)
+			const labelsLowerCase = labels.map(l => l.toLowerCase());
+			frontmatterLabels.forEach(fmLabel => {
+				if (!labelsLowerCase.includes(fmLabel.toLowerCase())) {
+					labels.push(fmLabel);
+				}
+			});
+		}
 
 		const section = this.getFirstSectionFromLineText(textWithoutIndentation);
 
@@ -1049,5 +1061,55 @@ export class TaskParser {
 		// Ensure format is YYYY-MM-DD
 		const result = formatted.match(/\d{4}-\d{2}-\d{2}/);
 		return result ? result[0] : null;
+	}
+
+	// Get labels from file frontmatter todoist-labels field
+	getFrontmatterLabels(filepath: string): string[] {
+		try {
+			// Get file from vault
+			const file = this.app.vault.getAbstractFileByPath(filepath);
+			if (!file) {
+				return [];
+			}
+
+			// Ensure it's a TFile (not a folder)
+			if (!(file instanceof TFile)) {
+				return [];
+			}
+
+			// Read frontmatter from metadata cache
+			const cache = this.app.metadataCache.getFileCache(file);
+			if (!cache || !cache.frontmatter) {
+				return [];
+			}
+
+			// Extract todoist-labels field
+			const todoistLabels = cache.frontmatter["todoist-labels"];
+			if (!todoistLabels) {
+				return [];
+			}
+
+			// Normalize to array format
+			if (Array.isArray(todoistLabels)) {
+				// Filter out non-string values, trim whitespace, and remove empty strings
+				return todoistLabels
+					.filter(tag => typeof tag === "string")
+					.map(tag => tag.trim())
+					.filter(tag => tag.length > 0);
+			} else if (typeof todoistLabels === "string") {
+				// Single string value, trim and wrap in array
+				const trimmed = todoistLabels.trim();
+				return trimmed.length > 0 ? [trimmed] : [];
+			}
+
+			// Invalid format (number, object, etc.) - return empty
+			return [];
+		} catch (error) {
+			// If any error reading frontmatter, fail gracefully
+			if (this.plugin.settings.debugMode) {
+				console.error(`Error reading frontmatter labels from ${filepath}:`, error);
+			}
+			return [];
+		}
 	}
 }
