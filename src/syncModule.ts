@@ -13,9 +13,12 @@ export class TodoistSync {
 	}
 
 	// Check if the file has "tasks" without links
-	checkForTasksWithoutLink() {
-		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-		const currentFileValue = view?.data;
+	async checkForTasksWithoutLink(filepath: string): Promise<boolean> {
+		const file = this.app.vault.getAbstractFileByPath(filepath);
+		if (!file || !(file instanceof TFile)) {
+			return false;
+		}
+		const currentFileValue = await this.app.vault.read(file);
 		const regexTags = /#tdsync/gm;
 		const regexLinks =
 			/%% \[tid::\(\d+\)\[(?:https:\/\/app.todoist.com\/app\/task\/[a-zA-Z0-9]+|todoist:\/\/task\?id=[a-zA-Z0-9]+)\]%%/g;
@@ -30,7 +33,7 @@ export class TodoistSync {
 	}
 
 	async deletedTaskCheck(file_path: string): Promise<void> {
-		const hasEmptyTasks = this.checkForTasksWithoutLink();
+		const hasEmptyTasks = await this.checkForTasksWithoutLink(file_path);
 		if (hasEmptyTasks) {
 			return;
 		}
