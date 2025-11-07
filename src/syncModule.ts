@@ -224,10 +224,12 @@ export class TodoistSync {
 					// link = `%%[tid:: [${todoist_id}](${newTask.url})]%%`;
 					link = `%%[tid:: [${todoist_id}](https://app.todoist.com/app/task/${todoist_id})]%%`;
 				}
-				const text = this.plugin.taskParser?.addTodoistLink(
+				let text = this.plugin.taskParser?.addTodoistLink(
 					text_with_out_link,
 					link,
 				);
+				// Add frontmatter labels as hashtags to the task line
+				text = this.plugin.taskParser?.addFrontmatterLabelsToTaskLine(text ?? "", filepath) ?? text;
 				const from = { line: cursor.line, ch: 0 };
 				const to = { line: cursor.line, ch: currentLineText.length };
 				view.app.workspace.activeEditor?.editor?.replaceRange(text, from, to);
@@ -391,10 +393,12 @@ export class TodoistSync {
 					} else {
 						link = `%%[tid:: [${todoist_id}](https://app.todoist.com/app/task/${todoist_id})]%%`;
 					}
-					const text = this.plugin.taskParser?.addTodoistLink(
+					let text = this.plugin.taskParser?.addTodoistLink(
 						text_with_out_link,
 						link,
 					);
+					// Add frontmatter labels as hashtags to the task line
+					text = this.plugin.taskParser?.addFrontmatterLabelsToTaskLine(text ?? "", filepath) ?? text;
 					lines[i] = text;
 
 					newFrontMatter.todoistCount = (newFrontMatter.todoistCount ?? 0) + 1;

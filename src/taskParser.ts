@@ -1112,4 +1112,36 @@ export class TaskParser {
 			return [];
 		}
 	}
+
+	// Add frontmatter labels as hashtags to task line in Obsidian
+	addFrontmatterLabelsToTaskLine(lineText: string, filepath: string): string {
+		const frontmatterLabels = this.getFrontmatterLabels(filepath);
+		if (frontmatterLabels.length === 0) {
+			return lineText;
+		}
+
+		// Get existing hashtags from line (case-insensitive comparison)
+		const existingLabels = this.getAllTagsFromLineText(lineText);
+		const existingLowerCase = existingLabels.map(l => l.toLowerCase());
+
+		// Filter out labels that already exist in the line
+		const labelsToAdd = frontmatterLabels.filter(label =>
+			!existingLowerCase.includes(label.toLowerCase())
+		);
+
+		if (labelsToAdd.length === 0) {
+			return lineText;
+		}
+
+		// Add hashtags before #tdsync (or at end if no #tdsync)
+		const labelsString = labelsToAdd.map(l => `#${l}`).join(' ');
+		const todoistTag = this.keywords_function("TODOIST_TAG");
+
+		if (lineText.includes(todoistTag)) {
+			return lineText.replace(todoistTag, `${labelsString} ${todoistTag}`);
+		} else {
+			// If no todoist tag, add at end
+			return `${lineText} ${labelsString}`;
+		}
+	}
 }
