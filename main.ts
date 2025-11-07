@@ -322,6 +322,7 @@ export default class AnotherSimpleTodoistSync extends Plugin {
 						return;
 					}
 					try {
+						new Notice("Starting sync with Todoist...");
 						await this.scheduledSynchronization();
 						this.syncLock = false;
 						new Notice("Sync with Todoist completed.");
