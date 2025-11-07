@@ -292,7 +292,8 @@ export class TodoistSync {
 			return;
 		}
 
-		if (this.plugin.settings.enableFullVaultSync) {
+		// Check if auto-sync enabled (global OR per-file frontmatter)
+		if (this.plugin.taskParser?.shouldAutoSyncFile(filepath)) {
 			await this.plugin.fileOperation?.addTodoistTagToFile(filepath);
 		}
 
@@ -442,7 +443,8 @@ export class TodoistSync {
 	): Promise<void> {
 		//const lineText = await this.plugin.fileOperation?.getLineTextFromFilePath(filepath,lineNumber)
 
-		if (this.plugin.settings.enableFullVaultSync) {
+		// Check if auto-sync enabled (global OR per-file frontmatter)
+		if (this.plugin.taskParser?.shouldAutoSyncFile(filepath)) {
 			//await this.plugin.fileOperation?.addTodoistTagToLine(filepath,lineText,lineNumber,fileContent)
 
 			//new empty metadata

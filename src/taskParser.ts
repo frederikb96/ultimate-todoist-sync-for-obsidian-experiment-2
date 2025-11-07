@@ -1113,6 +1113,41 @@ export class TaskParser {
 		}
 	}
 
+	// Check if auto-sync should be enabled for this file
+	shouldAutoSyncFile(filepath: string): boolean {
+		try {
+			// Get file from vault
+			const file = this.app.vault.getAbstractFileByPath(filepath);
+			if (!file || !(file instanceof TFile)) {
+				// If file not found, fall back to global setting
+				return this.plugin.settings.enableFullVaultSync;
+			}
+
+			// Read frontmatter from metadata cache
+			const cache = this.app.metadataCache.getFileCache(file);
+			if (!cache || !cache.frontmatter) {
+				// No frontmatter, use global setting
+				return this.plugin.settings.enableFullVaultSync;
+			}
+
+			// Check if todoist-auto-sync is explicitly set in frontmatter
+			const autoSync = cache.frontmatter["todoist-auto-sync"];
+			if (autoSync !== undefined) {
+				// Frontmatter value is set, use it (true or false)
+				return autoSync === true;
+			}
+
+			// Not set in frontmatter, fall back to global setting
+			return this.plugin.settings.enableFullVaultSync;
+		} catch (error) {
+			// On error, fall back to global setting
+			if (this.plugin.settings.debugMode) {
+				console.error(`Error checking auto-sync for ${filepath}:`, error);
+			}
+			return this.plugin.settings.enableFullVaultSync;
+		}
+	}
+
 	// Add frontmatter labels as hashtags to task line in Obsidian
 	addFrontmatterLabelsToTaskLine(lineText: string, filepath: string): string {
 		const frontmatterLabels = this.getFrontmatterLabels(filepath);

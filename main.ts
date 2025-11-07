@@ -115,7 +115,9 @@ export default class AnotherSimpleTodoistSync extends Plugin {
 					if (!this.checkModuleClass()) {
 						return;
 					}
-					if (this.settings.enableFullVaultSync) {
+					// Check if auto-sync enabled (global OR per-file frontmatter)
+					const filepath = view?.file?.path;
+					if (filepath && this.taskParser?.shouldAutoSyncFile(filepath)) {
 						return;
 					}
 					if (!(await this.checkAndHandleSyncLock())) return;
@@ -198,7 +200,9 @@ export default class AnotherSimpleTodoistSync extends Plugin {
 						if (!this.checkModuleClass()) {
 							return;
 						}
-						if (this.settings.enableFullVaultSync) {
+						// Check if auto-sync enabled (global OR per-file frontmatter)
+						const filepath = view?.file?.path;
+						if (filepath && this.taskParser?.shouldAutoSyncFile(filepath)) {
 							return;
 						}
 						if (!(await this.checkAndHandleSyncLock())) return;
