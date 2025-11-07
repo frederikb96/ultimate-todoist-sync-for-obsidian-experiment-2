@@ -295,6 +295,10 @@ export class TodoistSync {
 		// Check if auto-sync enabled (global OR per-file frontmatter)
 		if (this.plugin.taskParser?.shouldAutoSyncFile(filepath)) {
 			await this.plugin.fileOperation?.addTodoistTagToFile(filepath);
+			// Re-read file content after tags were added to get updated content
+			if (file instanceof TFile) {
+				currentFileValue = await this.app.vault.read(file);
+			}
 		}
 
 		const content = currentFileValue;
