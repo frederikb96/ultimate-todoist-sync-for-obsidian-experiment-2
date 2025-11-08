@@ -12,6 +12,53 @@ export class TodoistSync {
 		this.plugin = plugin;
 	}
 
+	/**
+	 * Helper method to get file content, handling both active editor and disk reads.
+	 * Returns editor content for active files (includes unsaved changes), disk content otherwise.
+	 */
+	private async getFileContent(file_path: string): Promise<{
+		content: string | null;
+		file: TFile | null;
+		filepath: string | null;
+	}> {
+		let file: TAbstractFile | null;
+		let content: string | null;
+		let filepath: string | null;
+
+		if (file_path) {
+			file = this.app.vault.getAbstractFileByPath(file_path);
+			filepath = file_path;
+
+			if (!(file instanceof TFile)) {
+				return { content: null, file: null, filepath: null };
+			}
+
+			// Check if this file is currently open in an editor
+			const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+			const isActiveFile = view?.file?.path === file_path;
+
+			if (isActiveFile && view?.editor) {
+				// Use editor content for active file (includes real-time unsaved changes)
+				content = view.editor.getValue();
+			} else {
+				// Use disk content for non-active files
+				content = await this.app.vault.read(file);
+			}
+		} else {
+			const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+			file = this.app.workspace.getActiveFile();
+			filepath = file?.path ?? null;
+			// Use editor.getValue() for real-time content
+			content = view?.editor ? view.editor.getValue() : null;
+		}
+
+		return {
+			content,
+			file: file instanceof TFile ? file : null,
+			filepath,
+		};
+	}
+
 	// Check if the file has "tasks" without links
 	async checkForTasksWithoutLink(filepath: string): Promise<boolean> {
 		try {
@@ -43,30 +90,9 @@ export class TodoistSync {
 			return;
 		}
 
-		let file: TAbstractFile | null;
-		let currentFileValue: string | null;
-		let view: MarkdownView | null;
-		let filepath: string | null;
+		// Use helper to get file content (handles active editor vs disk reads)
+		const { content: currentFileValue, filepath } = await this.getFileContent(file_path);
 
-		if (file_path) {
-			file = this.app.vault.getAbstractFileByPath(file_path);
-			filepath = file_path;
-			// Check if the returned file is a TFile
-			if (file instanceof TFile) {
-				currentFileValue = await this.app.vault.read(file);
-			} else {
-				return;
-			}
-		} else {
-			view = this.app.workspace.getActiveViewOfType(MarkdownView);
-			//const editor = this.app.workspace.activeEditor?.editor
-			file = this.app.workspace.getActiveFile();
-			filepath = file?.path ?? null;
-			//Use view.data instead of vault.read. vault.read has a delay
-			currentFileValue = view?.data ?? null;
-		}
-
-		// const frontMatter = await this.plugin.fileOperation?.getFrontMatter(file);
 		if (!filepath) {
 			console.error("File path is undefined");
 			return;
@@ -153,7 +179,8 @@ export class TodoistSync {
 		view: MarkdownView,
 	): Promise<void> {
 		const filepath = view.file?.path;
-		const fileContent = view?.data;
+		// Use editor parameter directly for real-time content
+		const fileContent = editor.getValue();
 		const cursor = editor.getCursor();
 		const line = cursor.line;
 		const currentLineText = editor.getLine(line);
@@ -269,30 +296,8 @@ export class TodoistSync {
 	}
 
 	async fullTextNewTaskCheck(file_path: string): Promise<void> {
-		let file: TAbstractFile | null;
-		let currentFileValue: string | null;
-		let view: MarkdownView | null;
-		let filepath: string | null;
-
-		if (file_path) {
-			file = this.app.vault.getAbstractFileByPath(file_path);
-			filepath = file_path;
-			// currentFileValue = await this.app.vault.read(file)
-
-			// Check if the returned file is a TFile
-			if (file instanceof TFile) {
-				currentFileValue = await this.app.vault.read(file);
-			} else {
-				return;
-			}
-		} else {
-			view = this.app.workspace.getActiveViewOfType(MarkdownView);
-			//const editor = this.app.workspace.activeEditor?.editor
-			file = this.app.workspace.getActiveFile();
-			filepath = file?.path ?? null;
-			//Use view.data instead of vault.read. vault.read has a delay
-			currentFileValue = view?.data ?? null;
-		}
+		// Use helper to get file content (handles active editor vs disk reads)
+		let { content: currentFileValue, file, filepath } = await this.getFileContent(file_path);
 
 		if (!filepath) {
 			console.error("File path is undefined");
@@ -890,30 +895,9 @@ export class TodoistSync {
 	}
 
 	async fullTextModifiedTaskCheck(file_path: string): Promise<void> {
-		let file: TAbstractFile | null;
-		let currentFileValue: string | null;
-		let view: MarkdownView | null;
-		let filepath: string | null;
-
 		try {
-			if (file_path) {
-				file = this.app.vault.getAbstractFileByPath(file_path);
-				filepath = file_path;
-				// currentFileValue = await this.app.vault.read(file);
-				// Check if the returned file is a TFile
-				if (file instanceof TFile) {
-					currentFileValue = await this.app.vault.read(file);
-				} else {
-					return;
-				}
-			} else {
-				view = this.app.workspace.getActiveViewOfType(MarkdownView);
-				file = this.app.workspace.getActiveFile();
-				filepath = file?.path ?? null;
-				currentFileValue = view?.data ?? null;
-			}
-
-			const content = currentFileValue;
+			// Use helper to get file content (handles active editor vs disk reads)
+			const { content, filepath } = await this.getFileContent(file_path);
 
 			let hasModifiedTask = false;
 			const lines = content?.split("\n");

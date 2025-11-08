@@ -634,9 +634,15 @@ export default class AnotherSimpleTodoistSync extends Plugin {
 				console.error("An error occurred in saveSettings:", error);
 			}
 
-			const filesToSync = this.settings.fileMetadata;
-			// console.log("filesToSync is", filesToSync);
-			for (const fileKey in filesToSync) {
+			// Process files in chunks to avoid blocking UI
+			const files = Object.keys(this.settings.fileMetadata);
+			const CHUNK_SIZE = 10; // Process 10 files at a time
+
+			for (let i = 0; i < files.length; i += CHUNK_SIZE) {
+				const chunk = files.slice(i, i + CHUNK_SIZE);
+
+				// Process each file in the chunk
+				for (const fileKey of chunk) {
 				if (!(await this.checkAndHandleSyncLock())) return;
 				try {
 					await this.todoistSync?.fullTextNewTaskCheck(fileKey);
@@ -664,6 +670,10 @@ export default class AnotherSimpleTodoistSync extends Plugin {
 					);
 				}
 				this.syncLock = false;
+				}
+
+				// Yield to event loop after processing each chunk to keep UI responsive
+				await new Promise(resolve => setTimeout(resolve, 10));
 			}
 		} catch (error) {
 			console.error("An error occurred:", error);

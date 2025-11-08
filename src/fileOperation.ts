@@ -1,5 +1,5 @@
 import type { App } from "obsidian";
-import { TFile, Notice } from "obsidian";
+import { TFile, Notice, MarkdownView } from "obsidian";
 import type AnotherSimpleTodoistSync from "../main";
 export class FileOperation {
 	app: App;
@@ -10,6 +10,45 @@ export class FileOperation {
 		this.plugin = plugin;
 	}
 
+	/**
+	 * Helper method to process task lines and add Todoist tags where needed.
+	 * Returns modified lines and whether any changes were made.
+	 */
+	private processTaskLines(
+		lines: string[],
+		filepath: string,
+		frontmatterLabels: string[]
+	): { modifiedLines: string[]; wasModified: boolean } {
+		let wasModified = false;
+		const modifiedLines = [...lines];
+
+		for (let i = 0; i < modifiedLines.length; i++) {
+			const line = modifiedLines[i];
+
+			if (!this.plugin.taskParser?.isMarkdownTask(line)) {
+				continue;
+			}
+			if (this.plugin.taskParser?.getTaskContentFromLineText(line) === "") {
+				continue;
+			}
+			if (
+				!this.plugin.taskParser?.hasTodoistId(line) &&
+				!this.plugin.taskParser?.hasTodoistTag(line)
+			) {
+				let newLine = this.plugin.taskParser?.addTodoistTag(line);
+				newLine = this.plugin.taskParser?.addFrontmatterLabelsToTaskLine(
+					newLine,
+					filepath,
+					frontmatterLabels
+				);
+				modifiedLines[i] = newLine;
+				wasModified = true;
+			}
+		}
+
+		return { modifiedLines, wasModified };
+	}
+
 	// Complete a task to mark it as completed
 	async completeTaskInTheFile(taskId: string) {
 		// Get the task file path
@@ -18,34 +57,27 @@ export class FileOperation {
 		const filepath = currentTask?.path;
 		if (!filepath) return;
 		const file = this.app.vault.getAbstractFileByPath(filepath);
+		if (!(file instanceof TFile)) return;
 
-		// Get the file object and update the content
-		let content: string | undefined;
-		if (file instanceof TFile) {
-			content = await this.app.vault.read(file);
-		} else {
-			return;
-		}
+		// Use vault.process for non-blocking file modification
+		await this.app.vault.process(file, (content) => {
+			const lines = content.split("\n");
+			let modified = false;
 
-		const lines = content.split("\n");
-		let modified = false;
-
-		for (let i = 0; i < lines.length; i++) {
-			const line = lines[i];
-			if (
-				line.includes(taskId) &&
-				this.plugin.taskParser?.hasTodoistTag(line)
-			) {
-				lines[i] = line.replace("[ ]", "[x]");
-				modified = true;
-				break;
+			for (let i = 0; i < lines.length; i++) {
+				const line = lines[i];
+				if (
+					line.includes(taskId) &&
+					this.plugin.taskParser?.hasTodoistTag(line)
+				) {
+					lines[i] = line.replace("[ ]", "[x]");
+					modified = true;
+					break;
+				}
 			}
-		}
 
-		if (modified) {
-			const newContent = lines.join("\n");
-			await this.app.vault.modify(file, newContent);
-		}
+			return modified ? lines.join("\n") : content;
+		});
 	}
 
 	// uncheck Completed tasks，
@@ -56,80 +88,67 @@ export class FileOperation {
 		const filepath = currentTask?.path;
 		if (!filepath) return;
 		const file = this.app.vault.getAbstractFileByPath(filepath);
+		if (!(file instanceof TFile)) return;
 
-		// Get the file object and update the content
-		let content: string | undefined;
-		if (file instanceof TFile) {
-			content = await this.app.vault.read(file);
-		} else {
-			return;
-		}
+		// Use vault.process for non-blocking file modification
+		await this.app.vault.process(file, (content) => {
+			const lines = content.split("\n");
+			let modified = false;
 
-		const lines = content.split("\n");
-		let modified = false;
-
-		for (let i = 0; i < lines.length; i++) {
-			const line = lines[i];
-			if (
-				line.includes(taskId) &&
-				this.plugin.taskParser?.hasTodoistTag(line)
-			) {
-				lines[i] = line.replace(/- \[(x|X)\]/g, "- [ ]");
-				modified = true;
-				break;
+			for (let i = 0; i < lines.length; i++) {
+				const line = lines[i];
+				if (
+					line.includes(taskId) &&
+					this.plugin.taskParser?.hasTodoistTag(line)
+				) {
+					lines[i] = line.replace(/- \[(x|X)\]/g, "- [ ]");
+					modified = true;
+					break;
+				}
 			}
-		}
 
-		if (modified) {
-			const newContent = lines.join("\n");
-			await this.app.vault.modify(file, newContent);
-		}
+			return modified ? lines.join("\n") : content;
+		});
 	}
 
 	//add #todoist at the end of task line, if full vault sync enabled
 	async addTodoistTagToFile(filepath: string) {
 		// Get the file object and update the content
 		const file = this.app.vault.getAbstractFileByPath(filepath);
-		// Check if the returned file is a TFile
-		let content: string | undefined;
-		if (file instanceof TFile) {
-			content = await this.app.vault.read(file);
-		} else {
-			return;
-		}
+		if (!(file instanceof TFile)) return;
 
-		const lines = content.split("\n");
-		let modified = false;
-
-		// Read frontmatter labels once for performance (not in loop)
+		// Pre-fetch async data outside vault.process
 		const frontmatterLabels = this.plugin.taskParser?.getFrontmatterLabels(filepath) ?? [];
 
-		for (let i = 0; i < lines.length; i++) {
-			const line = lines[i];
-			if (!this.plugin.taskParser?.isMarkdownTask(line)) {
-				continue;
-			}
-			//if content is empty
-			if (this.plugin.taskParser?.getTaskContentFromLineText(line) === "") {
-				continue;
-			}
-			if (
-				!this.plugin.taskParser?.hasTodoistId(line) &&
-				!this.plugin.taskParser?.hasTodoistTag(line)
-			) {
-				let newLine = this.plugin.taskParser?.addTodoistTag(line);
-				// Also add frontmatter labels as hashtags (pass pre-fetched labels for performance)
-				newLine = this.plugin.taskParser?.addFrontmatterLabelsToTaskLine(newLine, filepath, frontmatterLabels);
-				lines[i] = newLine;
+		// Check if this file is currently open in an editor to get unsaved changes
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		const isActiveFile = view?.file?.path === filepath;
+		// Use editor.getValue() for real-time content including latest keystrokes
+		const editorContent = isActiveFile && view?.editor ? view.editor.getValue() : null;
+
+		let modified = false;
+
+		// If file is active with unsaved changes, modify editor content and write it
+		if (editorContent !== null) {
+			const lines = editorContent.split("\n");
+			const result = this.processTaskLines(lines, filepath, frontmatterLabels);
+
+			if (result.wasModified) {
 				modified = true;
+				await this.app.vault.modify(file, result.modifiedLines.join("\n"));
 			}
+		} else {
+			// File not active or no unsaved changes, use vault.process
+			await this.app.vault.process(file, (content) => {
+				const lines = content.split("\n");
+				const result = this.processTaskLines(lines, filepath, frontmatterLabels);
+				modified = result.wasModified;
+				return modified ? result.modifiedLines.join("\n") : content;
+			});
 		}
 
+		// Update file metadata after modification (applies to both paths)
 		if (modified) {
-			const newContent = lines.join("\n");
-			await this.app.vault.modify(file, newContent);
-
-			//update file metadata
 			const metadata =
 				await this.plugin.cacheOperation?.getFileMetadataByFilePath(filepath);
 			if (!metadata) {
@@ -142,42 +161,36 @@ export class FileOperation {
 	async addTodoistLinkToFile(filepath: string) {
 		// Get the file object and update the content
 		const file = this.app.vault.getAbstractFileByPath(filepath);
-		// Check if the returned file is a TFile
-		let content: string | undefined;
-		if (file instanceof TFile) {
-			content = await this.app.vault.read(file);
-		} else {
-			return;
-		}
+		if (!(file instanceof TFile)) return;
 
-		const lines = content.split("\n");
-		let modified = false;
+		// Use vault.process for non-blocking file modification
+		await this.app.vault.process(file, (content) => {
+			const lines = content.split("\n");
+			let modified = false;
 
-		for (let i = 0; i < lines.length; i++) {
-			const line = lines[i];
-			if (
-				this.plugin.taskParser?.hasTodoistId(line) &&
-				this.plugin.taskParser?.hasTodoistTag(line)
-			) {
-				if (this.plugin.taskParser?.hasTodoistLink(line)) {
-					return;
+			for (let i = 0; i < lines.length; i++) {
+				const line = lines[i];
+				if (
+					this.plugin.taskParser?.hasTodoistId(line) &&
+					this.plugin.taskParser?.hasTodoistTag(line)
+				) {
+					if (this.plugin.taskParser?.hasTodoistLink(line)) {
+						continue; // Already has link
+					}
+					const taskID = this.plugin.taskParser?.getTodoistIdFromLineText(line);
+					if (!taskID) continue;
+					const taskObject =
+						this.plugin.cacheOperation?.loadTaskFromCacheID(taskID);
+					const todoistLink = taskObject?.url;
+					const link = `%%tid:: [${taskID}](${todoistLink})%%`;
+					const newLine = this.plugin.taskParser?.addTodoistLink(line, link);
+					lines[i] = newLine;
+					modified = true;
 				}
-				const taskID = this.plugin.taskParser?.getTodoistIdFromLineText(line);
-				if (!taskID) continue;
-				const taskObject =
-					this.plugin.cacheOperation?.loadTaskFromCacheID(taskID);
-				const todoistLink = taskObject?.url;
-				const link = `%%tid:: [${taskID}](${todoistLink})%%`;
-				const newLine = this.plugin.taskParser?.addTodoistLink(line, link);
-				lines[i] = newLine;
-				modified = true;
 			}
-		}
 
-		if (modified) {
-			const newContent = lines.join("\n");
-			await this.app.vault.modify(file, newContent);
-		}
+			return modified ? lines.join("\n") : content;
+		});
 	}
 
 	async addCurrentDateToTask(
@@ -209,17 +222,7 @@ export class FileOperation {
 	) {
 		// Get the file object and update the content
 		const file = this.app.vault.getAbstractFileByPath(filepath);
-		// const content = fileContent
-		// Check if the returned file is a TFile
-		let content: string | undefined;
-		if (file instanceof TFile) {
-			content = fileContent;
-		} else {
-			return;
-		}
-
-		const lines = content.split("\n");
-		let modified = false;
+		if (!(file instanceof TFile)) return;
 
 		const line = lineText;
 		if (!this.plugin.taskParser?.isMarkdownTask(line)) {
@@ -230,19 +233,26 @@ export class FileOperation {
 			return;
 		}
 		if (
-			!this.plugin.taskParser?.hasTodoistId(line) &&
-			!this.plugin.taskParser?.hasTodoistTag(line)
+			this.plugin.taskParser?.hasTodoistId(line) ||
+			this.plugin.taskParser?.hasTodoistTag(line)
 		) {
-			const newLine = this.plugin.taskParser?.addTodoistTag(line);
-			lines[lineNumber] = newLine;
-			modified = true;
+			return; // Already has tag
 		}
 
-		if (modified) {
-			const newContent = lines.join("\n");
-			await this.app.vault.modify(file, newContent);
+		// Use vault.process for non-blocking file modification
+		let modified = false;
+		await this.app.vault.process(file, (content) => {
+			const lines = content.split("\n");
+			const newLine = this.plugin.taskParser?.addTodoistTag(line);
+			if (newLine) {
+				lines[lineNumber] = newLine;
+				modified = true;
+			}
+			return modified ? lines.join("\n") : content;
+		});
 
-			//update file metadata
+		// Update file metadata after modification
+		if (modified) {
 			const metadata =
 				await this.plugin.cacheOperation?.getFileMetadataByFilePath(filepath);
 			if (!metadata) {
@@ -263,39 +273,32 @@ export class FileOperation {
 		const filepath = currentTask?.path;
 		if (!filepath) return;
 		const file = this.app.vault.getAbstractFileByPath(filepath);
+		if (!(file instanceof TFile)) return;
 
-		// 获取文件对象并更新内容
-		let content: string | undefined;
-		if (file instanceof TFile) {
-			content = await this.app.vault.read(file);
-		} else {
-			return;
-		}
+		// Use vault.process for non-blocking file modification
+		await this.app.vault.process(file, (content) => {
+			const lines = content.split("\n");
+			let modified = false;
 
-		const lines = content.split("\n");
-		let modified = false;
+			for (let i = 0; i < lines.length; i++) {
+				const line = lines[i];
+				if (
+					line.includes(taskId) &&
+					this.plugin.taskParser?.hasTodoistTag(line)
+				) {
+					const oldTaskContent =
+						this.plugin.taskParser?.getTaskContentFromLineText(line);
+					const newTaskContent = evt.extra_data.content;
 
-		for (let i = 0; i < lines.length; i++) {
-			const line = lines[i];
-			if (
-				line.includes(taskId) &&
-				this.plugin.taskParser?.hasTodoistTag(line)
-			) {
-				const oldTaskContent =
-					this.plugin.taskParser?.getTaskContentFromLineText(line);
-				const newTaskContent = evt.extra_data.content;
-
-				lines[i] = line.replace(oldTaskContent, newTaskContent);
-				modified = true;
-				new Notice(`Content changed for task ${taskId}.`);
-				break;
+					lines[i] = line.replace(oldTaskContent, newTaskContent);
+					modified = true;
+					new Notice(`Content changed for task ${taskId}.`);
+					break;
+				}
 			}
-		}
 
-		if (modified) {
-			const newContent = lines.join("\n");
-			await this.app.vault.modify(file, newContent);
-		}
+			return modified ? lines.join("\n") : content;
+		});
 	}
 
 	// sync updated task due date  to the file
@@ -311,101 +314,94 @@ export class FileOperation {
 		const filepath = currentTask?.path;
 		if (!filepath) return;
 		const file = this.app.vault.getAbstractFileByPath(filepath);
+		if (!(file instanceof TFile)) return;
 
-		// Get the file object and update the content
-		let content: string | undefined;
-		if (file instanceof TFile) {
-			content = await this.app.vault.read(file);
-		} else {
-			return;
-		}
+		// Use vault.process for non-blocking file modification
+		await this.app.vault.process(file, (content) => {
+			const lines = content.split("\n");
+			let modified = false;
 
-		const lines = content.split("\n");
-		let modified = false;
-
-		for (let i = 0; i < lines.length; i++) {
-			const line = lines[i];
-
-			if (
-				line.includes(taskId) &&
-				this.plugin.taskParser?.hasTodoistTag(line)
-			) {
-				const lineTaskDueDate =
-					this.plugin.taskParser?.getDueDateFromLineText(line) || "";
-				const newTaskDueDate =
-					this.plugin.taskParser?.ISOStringToLocalDateString(
-						evt.extra_data.due_date,
-					) || "";
-				const lineTaskTime =
-					this.plugin.taskParser?.getDueTimeFromLineText(line) || "";
-
-				// If the task on the file doesn't have time, doesn't need to find the new time from the cache
-				let newTaskTime = "";
-				if (lineTaskTime === "") {
-					newTaskTime =
-						this.plugin.taskParser?.ISOStringToLocalClockTimeString(
-							evt.extra_data.due_date,
-						) || "";
-				}
-				// TODO how to handle when the task has the new "time slot" with start + finish time?
-
-				if (this.plugin.taskParser && lineTaskDueDate === "") {
-					const userDefinedTag =
-						this.plugin.taskParser?.keywords_function("TODOIST_TAG");
-					const tagWithDateAndSymbol = ` 🗓️${newTaskDueDate} ${userDefinedTag}`;
-					lines[i] = lines[i].replace(userDefinedTag, tagWithDateAndSymbol);
-					modified = true;
-					new Notice(`New due date found for ${taskId}.`);
-				}
-
-				if (lineTaskTime === "" && newTaskTime !== "") {
-					const userDefinedTag =
-						this.plugin.taskParser?.keywords_function("TODOIST_TAG");
-					const tagWithTimeAndSymbol = `⏰${newTaskTime} ${userDefinedTag}`;
-					lines[i] = lines[i].replace(userDefinedTag, tagWithTimeAndSymbol);
-					modified = true;
-					new Notice(`Due datetime included for ${taskId}.`);
-				}
-
-				if (newTaskDueDate === "") {
-					//remove 日期from text
-					const regexRemoveDate = /(🗓️|📅|📆|🗓|@)\s?\d{4}-\d{2}-\d{2}/; //匹配日期🗓️2023-03-07"
-					lines[i] = line.replace(regexRemoveDate, "");
-					modified = true;
-					new Notice(`Due date removed from ${taskId}.`);
-				}
-
-				if (lineTaskDueDate !== "" && lineTaskDueDate !== newTaskDueDate) {
-					lines[i] = lines[i].replace(
-						lineTaskDueDate.trim(),
-						newTaskDueDate.trim(),
-					);
-					modified = true;
-					new Notice(`Due date for ${taskId} changed to ${newTaskDueDate}.`);
-				}
+			for (let i = 0; i < lines.length; i++) {
+				const line = lines[i];
 
 				if (
-					lineTaskTime !== "" &&
-					newTaskTime !== "" &&
-					lineTaskTime !== newTaskTime
+					line.includes(taskId) &&
+					this.plugin.taskParser?.hasTodoistTag(line)
 				) {
-					lines[i] = lines[i].replace(lineTaskTime.trim(), newTaskTime.trim());
-					lines[i] = lines[i].replace(
-						lineTaskDueDate.trim(),
-						newTaskDueDate.trim(),
-					);
-					modified = true;
-					new Notice(`Due datetime for ${taskId} changed to ${newTaskTime}.`);
+					const lineTaskDueDate =
+						this.plugin.taskParser?.getDueDateFromLineText(line) || "";
+					const newTaskDueDate =
+						this.plugin.taskParser?.ISOStringToLocalDateString(
+							evt.extra_data.due_date,
+						) || "";
+					const lineTaskTime =
+						this.plugin.taskParser?.getDueTimeFromLineText(line) || "";
+
+					// If the task on the file doesn't have time, doesn't need to find the new time from the cache
+					let newTaskTime = "";
+					if (lineTaskTime === "") {
+						newTaskTime =
+							this.plugin.taskParser?.ISOStringToLocalClockTimeString(
+								evt.extra_data.due_date,
+							) || "";
+					}
+					// TODO how to handle when the task has the new "time slot" with start + finish time?
+
+					if (this.plugin.taskParser && lineTaskDueDate === "") {
+						const userDefinedTag =
+							this.plugin.taskParser?.keywords_function("TODOIST_TAG");
+						const tagWithDateAndSymbol = ` 🗓️${newTaskDueDate} ${userDefinedTag}`;
+						lines[i] = lines[i].replace(userDefinedTag, tagWithDateAndSymbol);
+						modified = true;
+						new Notice(`New due date found for ${taskId}.`);
+					}
+
+					if (lineTaskTime === "" && newTaskTime !== "") {
+						const userDefinedTag =
+							this.plugin.taskParser?.keywords_function("TODOIST_TAG");
+						const tagWithTimeAndSymbol = `⏰${newTaskTime} ${userDefinedTag}`;
+						lines[i] = lines[i].replace(userDefinedTag, tagWithTimeAndSymbol);
+						modified = true;
+						new Notice(`Due datetime included for ${taskId}.`);
+					}
+
+					if (newTaskDueDate === "") {
+						//remove 日期from text
+						const regexRemoveDate = /(🗓️|📅|📆|🗓|@)\s?\d{4}-\d{2}-\d{2}/; //匹配日期🗓️2023-03-07"
+						lines[i] = line.replace(regexRemoveDate, "");
+						modified = true;
+						new Notice(`Due date removed from ${taskId}.`);
+					}
+
+					if (lineTaskDueDate !== "" && lineTaskDueDate !== newTaskDueDate) {
+						lines[i] = lines[i].replace(
+							lineTaskDueDate.trim(),
+							newTaskDueDate.trim(),
+						);
+						modified = true;
+						new Notice(`Due date for ${taskId} changed to ${newTaskDueDate}.`);
+					}
+
+					if (
+						lineTaskTime !== "" &&
+						newTaskTime !== "" &&
+						lineTaskTime !== newTaskTime
+					) {
+						lines[i] = lines[i].replace(lineTaskTime.trim(), newTaskTime.trim());
+						lines[i] = lines[i].replace(
+							lineTaskDueDate.trim(),
+							newTaskDueDate.trim(),
+						);
+						modified = true;
+						new Notice(`Due datetime for ${taskId} changed to ${newTaskTime}.`);
+					}
+
+					break;
 				}
-
-				break;
 			}
-		}
 
-		if (modified) {
-			const newContent = lines.join("\n");
-			await this.app.vault.modify(file, newContent);
-		}
+			return modified ? lines.join("\n") : content;
+		});
 	}
 
 	// sync new task note to file
@@ -425,38 +421,32 @@ export class FileOperation {
 		const filepath = currentTask?.path;
 		if (!filepath) return;
 		const file = this.app.vault.getAbstractFileByPath(filepath);
+		if (!(file instanceof TFile)) return;
 
-		// 获取文件对象并更新内容
-		let content: string | undefined;
-		if (file instanceof TFile) {
-			content = await this.app.vault.read(file);
-		} else {
-			return;
-		}
+		// Only modify if commentsSync is enabled
+		if (!this.plugin.settings.commentsSync) return;
 
-		const lines = content.split("\n");
-		let modified = false;
+		// Use vault.process for non-blocking file modification
+		await this.app.vault.process(file, (content) => {
+			const lines = content.split("\n");
+			let modified = false;
 
-		for (let i = 0; i < lines.length; i++) {
-			const line = lines[i];
-			if (
-				line.includes(taskId) &&
-				this.plugin.taskParser?.hasTodoistTag(line)
-			) {
-				const indent = "\t".repeat(line.length - line.trimStart().length + 1);
-				const noteLine = `${indent}- ${datetime} ${note}`;
-				lines.splice(i + 1, 0, noteLine);
-				modified = true;
-				break;
+			for (let i = 0; i < lines.length; i++) {
+				const line = lines[i];
+				if (
+					line.includes(taskId) &&
+					this.plugin.taskParser?.hasTodoistTag(line)
+				) {
+					const indent = "\t".repeat(line.length - line.trimStart().length + 1);
+					const noteLine = `${indent}- ${datetime} ${note}`;
+					lines.splice(i + 1, 0, noteLine);
+					modified = true;
+					break;
+				}
 			}
-		}
 
-		if (modified) {
-			if (this.plugin.settings.commentsSync) {
-				const newContent = lines.join("\n");
-				await this.app.vault.modify(file, newContent);
-			}
-		}
+			return modified ? lines.join("\n") : content;
+		});
 	}
 
 	//避免使用该方式，通过view可以获得实时更新的value
