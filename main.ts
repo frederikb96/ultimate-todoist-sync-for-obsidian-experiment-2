@@ -1,4 +1,4 @@
-import { MarkdownView, Notice, Plugin, type Editor } from "obsidian";
+import { MarkdownView, Notice, Plugin, TFile, type Editor } from "obsidian";
 
 //settings
 import {
@@ -23,8 +23,9 @@ export default class AnotherSimpleTodoistSync extends Plugin {
 	lastLines: Map<string, number>;
 	statusBar: HTMLElement;
 	syncLock: boolean;
+	hasRunStartupCleanup: boolean;
 
-	
+
 
 	async onload() {
 		this.app.workspace.onLayoutReady(async () => {
@@ -615,9 +616,71 @@ export default class AnotherSimpleTodoistSync extends Plugin {
 		}
 	}
 
+	/**
+	 * Cleanup orphaned files - files that were deleted when plugin was inactive.
+	 * Runs once on first scheduled sync to clean up any leftover metadata and tasks.
+	 */
+	async cleanupOrphanedFiles() {
+		const metadata = this.settings.fileMetadata;
+		let cleanedCount = 0;
+		let tasksDeletedCount = 0;
+
+		for (const filepath in metadata) {
+			const file = this.app.vault.getAbstractFileByPath(filepath);
+
+			if (!file || !(file instanceof TFile)) {
+				console.warn(`Found orphaned file in metadata: ${filepath}`);
+				cleanedCount++;
+
+				try {
+					// Get metadata for this file to find task IDs
+					const frontMatter = await this.cacheOperation?.getFileMetadataByFilePath(filepath);
+
+					if (frontMatter?.todoistTasks && frontMatter.todoistTasks.length > 0) {
+						// Delete all tasks from Todoist API
+						const api = this.todoistNewAPI?.initializeNewAPI();
+						if (!api) {
+							console.error("Failed to initialize Todoist API");
+							continue;
+						}
+
+						for (const taskId of frontMatter.todoistTasks) {
+							try {
+								const response = await api.deleteTask(taskId);
+								if (response) {
+									console.log(`Deleted orphaned task ${taskId} from file ${filepath}`);
+									tasksDeletedCount++;
+								}
+							} catch (error) {
+								console.error(`Failed to delete task ${taskId}:`, error);
+							}
+						}
+					}
+
+					// Now safe to remove metadata
+					await this.cacheOperation?.deleteFilepathFromMetadata(filepath);
+				} catch (error) {
+					console.error(`Error cleaning up ${filepath}:`, error);
+				}
+			}
+		}
+
+		if (cleanedCount > 0) {
+			console.log(`Cleaned up ${cleanedCount} orphaned file(s), deleted ${tasksDeletedCount} task(s)`);
+			new Notice(`Cleaned up ${cleanedCount} orphaned file(s), deleted ${tasksDeletedCount} task(s)`, 5000);
+		}
+	}
+
 	async scheduledSynchronization() {
 		if (!this.checkModuleClass()) {
 			return;
+		}
+
+		// Run startup cleanup on first sync (cleans up files deleted when plugin was off)
+		if (!this.hasRunStartupCleanup) {
+			console.log("Running startup cleanup for orphaned files...");
+			await this.cleanupOrphanedFiles();
+			this.hasRunStartupCleanup = true;
 		}
 
 		try {

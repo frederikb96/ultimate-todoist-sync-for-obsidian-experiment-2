@@ -1030,6 +1030,93 @@ export class TaskParser {
 		return regex_has_todoist_link.test(line_text);
 	}
 
+	// Extract the full todoist link from line text (e.g., "%%[tid:: [123](url)]%%")
+	getTodoistLinkFromLineText(line_text: string): string | null {
+		const regex = /%%\[tid::\s\[[a-zA-Z0-9]+\]\((?:https:\/\/app\.todoist\.com\/app\/task\/[a-zA-Z0-9]+|todoist:\/\/task\?id=[a-zA-Z0-9]+)\)\]%%/;
+		const match = line_text.match(regex);
+		return match ? match[0] : null;
+	}
+
+	// Get the indentation (spaces/tabs) at the start of a line
+	getIndentation(lineText: string): string {
+		const match = lineText.match(/^([ \t]*)/);
+		return match ? match[1] : "";
+	}
+
+	/**
+	 * Normalize task line to standard structure:
+	 * [indent] - [ ] content #usertags !!priority 🗓️date ⏰time #tdsync %%tid%%
+	 *
+	 * Only normalizes tasks that have #tdsync or tid (Todoist-tracked tasks)
+	 */
+	normalizeTaskLine(lineText: string): string {
+		// Only normalize Todoist-tracked tasks
+		if (!this.hasTodoistTag(lineText) && !this.hasTodoistId(lineText)) {
+			return lineText;
+		}
+
+		// 1. Extract all components
+		const indent = this.getIndentation(lineText);
+		const isChecked = this.isTaskCheckboxChecked(lineText);
+		const checkbox = isChecked ? "- [x]" : "- [ ]";
+		const content = this.getTaskContentFromLineText(lineText);
+
+		// If content is empty, don't normalize (malformed task)
+		if (!content || content.trim() === "") {
+			return lineText;
+		}
+
+		const allTags = this.getAllTagsFromLineText(lineText);
+		const priority = this.getTaskPriority(lineText);
+		const dueDate = this.getDueDateFromLineText(lineText);
+		const dueTime = this.getDueTimeFromLineText(lineText);
+		const tidLink = this.getTodoistLinkFromLineText(lineText);
+
+		// Check if line has explicit priority marker (not default)
+		const hasPriorityMark = /\s!!([1-4])\s/.test(lineText);
+
+		// Filter out #tdsync from user tags (will be added at end)
+		const tdSyncTag = this.keywords_function("TODOIST_TAG");
+		const userTags = allTags.filter(tag => tag.toLowerCase() !== 'tdsync');
+
+		// 2. Build parts array in correct order
+		const parts: string[] = [
+			indent + checkbox,
+			content
+		];
+
+		// Add user tags (excluding #tdsync)
+		if (userTags.length > 0) {
+			parts.push(userTags.map(tag => `#${tag}`).join(' '));
+		}
+
+		// Add priority (only if line has explicit priority marker)
+		if (hasPriorityMark && priority) {
+			parts.push(`!!${priority}`);
+		}
+
+		// Add due date
+		if (dueDate) {
+			parts.push(`🗓️${dueDate}`);
+		}
+
+		// Add due time
+		if (dueTime) {
+			parts.push(`⏰${dueTime}`);
+		}
+
+		// Add #tdsync tag (second to last)
+		parts.push(tdSyncTag);
+
+		// Add tid link (last)
+		if (tidLink) {
+			parts.push(tidLink);
+		}
+
+		// 3. Join with spaces
+		return parts.join(' ');
+	}
+
 	// Extract deadline_date from {{MM-DD}} and always return it as YYYY-MM-DD
 	getDeadlineDateFromLineText(text: string): string | null {
 		const match = text.match(/\{\{(?:(\d{4}|\d{2})-)?(1[0-2]|0?[1-9])-(3[01]|[12]\d|0?[1-9])\}\}/);

@@ -30,6 +30,9 @@ export class TodoistSync {
 			filepath = file_path;
 
 			if (!(file instanceof TFile)) {
+				// File doesn't exist - will be cleaned up by orphaned file cleanup
+				// Don't remove metadata here - deletedTaskCheck needs it to delete tasks
+				console.warn(`File not found: ${file_path}`);
 				return { content: null, file: null, filepath: null };
 			}
 
@@ -305,13 +308,15 @@ export class TodoistSync {
 			return;
 		}
 
+		if (!(file instanceof TFile)) {
+			return;
+		}
+
 		// Check if auto-sync enabled (global OR per-file frontmatter)
 		if (this.plugin.taskParser?.shouldAutoSyncFile(filepath)) {
 			await this.plugin.fileOperation?.addTodoistTagToFile(filepath);
 			// Re-read file content after tags were added to get updated content
-			if (file instanceof TFile) {
-				currentFileValue = await this.app.vault.read(file);
-			}
+			currentFileValue = await this.app.vault.read(file);
 		}
 
 		const content = currentFileValue;
@@ -334,7 +339,14 @@ export class TodoistSync {
 			return;
 		}
 
-		let hasNewTask = false;
+		// PHASE 1: Collect all tasks that need IDs (no API calls yet)
+		interface TaskToCreate {
+			taskContent: string;  // Just the content for matching
+			taskObject: any;
+			originalLine: string;
+		}
+
+		const tasksToCreate: TaskToCreate[] = [];
 		const lines = content.split("\n");
 
 		for (let i = 0; i < lines.length; i++) {
@@ -354,100 +366,170 @@ export class TodoistSync {
 					continue;
 				}
 
-				try {
-					const newTask = await this.plugin.todoistNewAPI?.addTask({
-						project_id: currentTask.project_id ?? "",
-						content: currentTask.content,
-						parent_id: currentTask.parent_id ?? undefined,
-						due_date: currentTask.due_date ?? undefined,
-						due_datetime: currentTask.due_datetime ?? undefined,
-						labels: currentTask.labels,
-						description: currentTask.description,
-						priority: currentTask.priority,
-						section_id: currentTask.section_id ?? undefined,
-						path: currentTask.path,
-						duration: typeof currentTask.duration === "number"
-							? currentTask.duration
-							: (currentTask.duration?.amount ?? 0),
-						duration_unit: currentTask.duration_unit ?? "minute",
-						...(currentTask.deadline_date ? { deadline_date: currentTask.deadline_date } : {}),
-					});
-
-					const todoist_id = newTask?.id;
-					if (!todoist_id) {
-						console.error("Failed to get task ID");
-						return;
-					}
-					if (!newTask) {
-						console.error("Failed to add new task");
-						new Notice("Failed to add new task");
-						return;
-					}
-
-					new Notice(
-						`New task "${newTask.content}" added. Task ID: ${newTask.id}`,
-					);
-					//newTask写入json文件
-					this.plugin.cacheOperation?.appendTaskToCache(
-						newTask as unknown as Task,
-					);
-					this.plugin.cacheOperation?.appendPathToTaskInCache(
-						todoist_id,
-						filepath,
-					);
-
-					//如果任务已完成
-					if (currentTask.isCompleted === true) {
-						await this.plugin.todoistNewAPI?.closeTask(newTask.id);
-						this.plugin.cacheOperation?.closeTaskToCacheByID(todoist_id ?? "");
-					}
-					this.plugin.saveSettings();
-
-					//todoist id 保存到 任务后面
-					const text_with_out_link = `${line}`;
-					let link: string;
-					if (this.plugin.settings.linksAppURI) {
-						link = `%%[tid:: [${todoist_id}](todoist://task?id=${newTask.id})]%%`;
-					} else {
-						link = `%%[tid:: [${todoist_id}](https://app.todoist.com/app/task/${todoist_id})]%%`;
-					}
-					let text = this.plugin.taskParser?.addTodoistLink(
-						text_with_out_link,
-						link,
-					);
-					// Add frontmatter labels as hashtags to the task line
-					text = this.plugin.taskParser?.addFrontmatterLabelsToTaskLine(text ?? "", filepath) ?? text;
-					lines[i] = text;
-
-					newFrontMatter.todoistCount = (newFrontMatter.todoistCount ?? 0) + 1;
-
-					// 记录 taskID
-					newFrontMatter.todoistTasks = [
-						...(newFrontMatter.todoistTasks || []),
-						todoist_id,
-					];
-
-					hasNewTask = true;
-				} catch (error) {
-					console.error("Error adding task:", error);
+				// Extract just the task content for matching later
+				const taskContent = this.plugin.taskParser?.getTaskContentFromLineText(line) ?? "";
+				if (!taskContent) {
+					continue;
 				}
+
+				tasksToCreate.push({
+					taskContent: taskContent,
+					taskObject: currentTask,
+					originalLine: line
+				});
 			}
 		}
-		if (hasNewTask) {
-			//文本和 frontMatter
+
+		if (tasksToCreate.length === 0) {
+			return;
+		}
+
+		// PHASE 2: Create all tasks via API (user can edit during this phase)
+		interface CreatedTask {
+			taskContent: string;
+			todoistId: string;
+			link: string;
+			newTask: any;
+			wasCompleted: boolean;
+		}
+
+		const createdTasks: CreatedTask[] = [];
+
+		for (const taskInfo of tasksToCreate) {
 			try {
-				const newContent = lines.join("\n");
-				if (file && file instanceof TFile) {
-					await this.app.vault.modify(file, newContent);
+				const newTask = await this.plugin.todoistNewAPI?.addTask({
+					project_id: taskInfo.taskObject.project_id ?? "",
+					content: taskInfo.taskObject.content,
+					parent_id: taskInfo.taskObject.parent_id ?? undefined,
+					due_date: taskInfo.taskObject.due_date ?? undefined,
+					due_datetime: taskInfo.taskObject.due_datetime ?? undefined,
+					labels: taskInfo.taskObject.labels,
+					description: taskInfo.taskObject.description,
+					priority: taskInfo.taskObject.priority,
+					section_id: taskInfo.taskObject.section_id ?? undefined,
+					path: taskInfo.taskObject.path,
+					duration: typeof taskInfo.taskObject.duration === "number"
+						? taskInfo.taskObject.duration
+						: (taskInfo.taskObject.duration?.amount ?? 0),
+					duration_unit: taskInfo.taskObject.duration_unit ?? "minute",
+					...(taskInfo.taskObject.deadline_date ? { deadline_date: taskInfo.taskObject.deadline_date } : {}),
+				});
+
+				const todoist_id = newTask?.id;
+				if (!todoist_id || !newTask) {
+					console.error("Failed to create task");
+					continue;
 				}
-				await this.updateTodoistFrontMatter(
-					filepath,
-					newFrontMatter.todoistTasks,
-					newFrontMatter.todoistCount,
+
+				new Notice(
+					`New task "${newTask.content}" added. Task ID: ${newTask.id}`,
 				);
+
+				// Update cache
+				this.plugin.cacheOperation?.appendTaskToCache(
+					newTask as unknown as Task,
+				);
+				this.plugin.cacheOperation?.appendPathToTaskInCache(
+					todoist_id,
+					filepath,
+				);
+
+				// Handle completed tasks
+				if (taskInfo.taskObject.isCompleted === true) {
+					await this.plugin.todoistNewAPI?.closeTask(newTask.id);
+					this.plugin.cacheOperation?.closeTaskToCacheByID(todoist_id ?? "");
+				}
+
+				this.plugin.saveSettings();
+
+				// Build link for this task
+				let link: string;
+				if (this.plugin.settings.linksAppURI) {
+					link = `%%[tid:: [${todoist_id}](todoist://task?id=${newTask.id})]%%`;
+				} else {
+					link = `%%[tid:: [${todoist_id}](https://app.todoist.com/app/task/${todoist_id})]%%`;
+				}
+
+				createdTasks.push({
+					taskContent: taskInfo.taskContent,
+					todoistId: todoist_id,
+					link: link,
+					newTask: newTask,
+					wasCompleted: taskInfo.taskObject.isCompleted === true
+				});
+
+				// Update frontmatter tracking
+				newFrontMatter.todoistCount = (newFrontMatter.todoistCount ?? 0) + 1;
+				newFrontMatter.todoistTasks = [
+					...(newFrontMatter.todoistTasks || []),
+					todoist_id,
+				];
 			} catch (error) {
-				console.error(error);
+				console.error("Error adding task:", error);
 			}
+		}
+
+		if (createdTasks.length === 0) {
+			return;
+		}
+
+		// PHASE 3: Atomically update file using vault.process()
+		// This reads the LATEST content (including any user edits during Phase 2)
+		// and adds IDs to matching tasks
+		const safeFilepath = filepath; // Capture for closure
+		await this.app.vault.process(file, (fileContent) => {
+			const contentLines = fileContent.split("\n");
+
+			// Build map of task content -> created task info
+			// Use Map to handle duplicates (first match wins)
+			const taskMap = new Map<string, CreatedTask>();
+			for (const created of createdTasks) {
+				if (!taskMap.has(created.taskContent)) {
+					taskMap.set(created.taskContent, created);
+				}
+			}
+
+			// Find and update lines that match our created tasks
+			for (let i = 0; i < contentLines.length; i++) {
+				const line = contentLines[i];
+
+				// Only process lines with #tdsync tag but no ID yet
+				if (
+					this.plugin.taskParser?.hasTodoistTag(line) &&
+					!this.plugin.taskParser?.hasTodoistId(line)
+				) {
+					// Extract content and check if we created this task
+					const lineContent = this.plugin.taskParser?.getTaskContentFromLineText(line) ?? "";
+
+					if (lineContent && taskMap.has(lineContent)) {
+						const taskInfo = taskMap.get(lineContent)!;
+
+						// Add ID link to line
+						let updatedLine = this.plugin.taskParser?.addTodoistLink(line, taskInfo.link);
+
+						// Add frontmatter labels as hashtags
+						updatedLine = this.plugin.taskParser?.addFrontmatterLabelsToTaskLine(updatedLine ?? "", safeFilepath) ?? updatedLine;
+
+						contentLines[i] = updatedLine ?? line;
+
+						// Remove from map to prevent duplicate matching
+						taskMap.delete(lineContent);
+					}
+				}
+			}
+
+			return contentLines.join("\n");
+		});
+
+		// Update frontmatter after atomic file write
+		try {
+			await this.updateTodoistFrontMatter(
+				filepath,
+				newFrontMatter.todoistTasks,
+				newFrontMatter.todoistCount,
+			);
+		} catch (error) {
+			console.error("Error updating frontmatter:", error);
 		}
 	}
 

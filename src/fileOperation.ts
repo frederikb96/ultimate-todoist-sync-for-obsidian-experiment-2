@@ -12,6 +12,7 @@ export class FileOperation {
 
 	/**
 	 * Helper method to process task lines and add Todoist tags where needed.
+	 * Also normalizes task line structure to standard format.
 	 * Returns modified lines and whether any changes were made.
 	 */
 	private processTaskLines(
@@ -31,6 +32,8 @@ export class FileOperation {
 			if (this.plugin.taskParser?.getTaskContentFromLineText(line) === "") {
 				continue;
 			}
+
+			// Add #tdsync tag if missing
 			if (
 				!this.plugin.taskParser?.hasTodoistId(line) &&
 				!this.plugin.taskParser?.hasTodoistTag(line)
@@ -42,6 +45,13 @@ export class FileOperation {
 					frontmatterLabels
 				);
 				modifiedLines[i] = newLine;
+				wasModified = true;
+			}
+
+			// Normalize task line structure (for tasks with #tdsync or tid)
+			const normalized = this.plugin.taskParser?.normalizeTaskLine(modifiedLines[i]);
+			if (normalized && normalized !== modifiedLines[i]) {
+				modifiedLines[i] = normalized;
 				wasModified = true;
 			}
 		}
@@ -120,34 +130,16 @@ export class FileOperation {
 		// Pre-fetch async data outside vault.process
 		const frontmatterLabels = this.plugin.taskParser?.getFrontmatterLabels(filepath) ?? [];
 
-		// Check if this file is currently open in an editor to get unsaved changes
-		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-		const isActiveFile = view?.file?.path === filepath;
-		// Use editor.getValue() for real-time content including latest keystrokes
-		const editorContent = isActiveFile && view?.editor ? view.editor.getValue() : null;
-
+		// Use vault.process for atomic file modification (non-blocking, handles concurrent edits)
 		let modified = false;
-
-		// If file is active with unsaved changes, modify editor content and write it
-		if (editorContent !== null) {
-			const lines = editorContent.split("\n");
+		await this.app.vault.process(file, (content) => {
+			const lines = content.split("\n");
 			const result = this.processTaskLines(lines, filepath, frontmatterLabels);
+			modified = result.wasModified;
+			return modified ? result.modifiedLines.join("\n") : content;
+		});
 
-			if (result.wasModified) {
-				modified = true;
-				await this.app.vault.modify(file, result.modifiedLines.join("\n"));
-			}
-		} else {
-			// File not active or no unsaved changes, use vault.process
-			await this.app.vault.process(file, (content) => {
-				const lines = content.split("\n");
-				const result = this.processTaskLines(lines, filepath, frontmatterLabels);
-				modified = result.wasModified;
-				return modified ? result.modifiedLines.join("\n") : content;
-			});
-		}
-
-		// Update file metadata after modification (applies to both paths)
+		// Update file metadata after modification
 		if (modified) {
 			const metadata =
 				await this.plugin.cacheOperation?.getFileMetadataByFilePath(filepath);
