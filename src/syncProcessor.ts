@@ -1,0 +1,573 @@
+// Sync Processor - Process single file with task detection and updates
+// Handles new tasks, existing tasks, bidirectional checking, and conflict resolution
+
+import { TFile, Vault, MetadataCache, Notice } from 'obsidian';
+import { v4 as uuidv4 } from 'uuid';
+import { Database } from './database';
+import { SyncSettings, TaskData, TaskInDB } from './types';
+import { isMarkdownTask, extractTID, nextFrame } from './utils';
+import { parseTaskLine, parseTaskContent, buildTaskLine, insertTID } from './taskParser';
+import { syncBatchCreate, syncBatchUpdate, syncBatchDelete } from './todoistAPI';
+import { resolveConflicts } from './conflictResolver';
+
+/**
+ * Process a single file: parse tasks, detect changes, resolve conflicts, update.
+ * Main file processor implementing the complete sync flow for one file.
+ *
+ * @param file - File to process
+ * @param vault - Obsidian vault
+ * @param metadataCache - Metadata cache
+ * @param db - Database instance
+ * @param settings - Plugin settings
+ */
+export async function processFile(
+	file: TFile,
+	vault: Vault,
+	metadataCache: MetadataCache,
+	db: Database,
+	settings: SyncSettings
+): Promise<void> {
+	console.log(`Processing file: ${file.path}`);
+
+	// Read file content (cached read for performance)
+	const content = await vault.cachedRead(file);
+	const lines = content.split('\n');
+
+	// Get frontmatter labels (apply to ALL tasks in this file)
+	const cache = metadataCache.getFileCache(file);
+	const frontmatterLabels: string[] = cache?.frontmatter?.['todoist-labels'] || [];
+
+	// Parse all markdown tasks in file (k-note lines 2261-2290)
+	// Process ALL tasks if frontmatter has todoist-sync: true
+	const allTasks: Array<{ lineNum: number; line: string; tid: string | null }> = [];
+
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+
+		if (isMarkdownTask(line)) {
+			const tid = extractTID(line);
+			allTasks.push({ lineNum: i, line, tid });
+		}
+	}
+
+	console.log(`Found ${allTasks.length} tasks in file`);
+
+	// Separate new vs existing tasks
+	const newTasks = allTasks.filter(t => t.tid === null);
+	const existingTasks = allTasks.filter(t => t.tid !== null);
+
+	console.log(`New tasks: ${newTasks.length}, Existing tasks: ${existingTasks.length}`);
+
+	// Process new tasks (create on Todoist API, write TIDs back)
+	if (newTasks.length > 0) {
+		await processNewTasks(file, newTasks, vault, db, settings, frontmatterLabels);
+	}
+
+	// Process existing tasks (detect changes, resolve conflicts, update)
+	if (existingTasks.length > 0) {
+		await processExistingTasks(file, existingTasks, vault, db, settings);
+	}
+
+	// Bidirectional check: DB → File (detect moved/deleted tasks)
+	await bidirectionalCheck(file, vault, metadataCache, db);
+
+	console.log(`Finished processing file: ${file.path}`);
+}
+
+/**
+ * Process new tasks: batch create on API, write TIDs back to file.
+ * Uses full content match to find tasks after API creation.
+ * k-note lines 2297-2357, 2640-2661
+ *
+ * @param file - File containing new tasks
+ * @param newTasks - Array of new tasks (no TID)
+ * @param vault - Obsidian vault
+ * @param db - Database instance
+ * @param settings - Plugin settings
+ * @param frontmatterLabels - Labels from file frontmatter
+ */
+async function processNewTasks(
+	file: TFile,
+	newTasks: Array<{ lineNum: number; line: string; tid: string | null }>,
+	vault: Vault,
+	db: Database,
+	settings: SyncSettings,
+	frontmatterLabels: string[]
+): Promise<void> {
+	console.log(`Processing ${newTasks.length} new tasks...`);
+
+	// Step 1: Build commands array with temp_id (preserve order!)
+	const commands = newTasks.map((task, index) => {
+		const taskData = parseTaskLine(task.line);
+		if (!taskData) {
+			console.error(`Failed to parse task line: ${task.line}`);
+			return null;
+		}
+
+		return {
+			temp_id: `new-${index}`,  // Preserve order!
+			content: taskData.content,
+			labels: ['tdsync', ...frontmatterLabels, ...taskData.labels],
+			project_id: settings.defaultProjectId,
+			due_date: taskData.dueDate,
+			due_datetime: taskData.dueDatetime,
+			priority: taskData.priority,
+			duration: taskData.duration
+		};
+	}).filter(cmd => cmd !== null);
+
+	if (commands.length === 0) {
+		console.warn('No valid tasks to create');
+		return;
+	}
+
+	// Step 2: Batch create on Todoist API
+	try {
+		const response = await syncBatchCreate(
+			settings.todoistAPIToken,
+			commands as any[]  // Type assertion (we filtered nulls)
+		);
+
+		console.log(`Created ${Object.keys(response.temp_id_mapping).length} tasks on Todoist`);
+
+		// Update sync token
+		settings.syncToken = response.sync_token;
+
+		// Step 3: Write TIDs back to file using FULL CONTENT MATCH
+		// k-note lines 2297-2357
+		await vault.process(file, (currentContent) => {
+			const currentLines = currentContent.split('\n');
+
+			// Process in ORDER (handles duplicate content!)
+			for (let i = 0; i < newTasks.length; i++) {
+				const task = newTasks[i];
+				const tempId = `new-${i}`;
+				const realTID = response.temp_id_mapping[tempId];
+
+				if (!realTID) {
+					console.error(`No TID mapping for temp_id: ${tempId}`);
+					continue;
+				}
+
+				// Find first occurrence of EXACT content (order matters!)
+				let found = false;
+				for (let lineIdx = 0; lineIdx < currentLines.length; lineIdx++) {
+					const currentLine = currentLines[lineIdx];
+
+					// Match by FULL content AND no TID yet
+					if (currentLine === task.line && extractTID(currentLine) === null) {
+						// Found it! Add TID and enforce ordering
+						const taskData = parseTaskLine(currentLine);
+						if (taskData) {
+							taskData.tid = realTID;
+							currentLines[lineIdx] = buildTaskLine(taskData, frontmatterLabels);
+
+							// Add to DB
+							db.setTask(realTID, {
+								tid: realTID,
+								filepath: file.path,
+								content: taskData.content,
+								completed: taskData.completed,
+								dueDate: taskData.dueDate,
+								dueTime: taskData.dueTime,
+								dueDatetime: taskData.dueDatetime,
+								priority: taskData.priority,
+								duration: taskData.duration,
+								labels: ['tdsync', ...frontmatterLabels, ...taskData.labels],
+								lastSyncedAt: Date.now(),
+								pending_changes: []
+							});
+
+							found = true;
+							break;  // Move to next task
+						}
+					}
+				}
+
+				// FALLBACK: Content changed between read and write!
+				// Delete from API to avoid ghost tasks
+				if (!found) {
+					console.error(`Task not found by full content match: ${task.line.substring(0, 50)}...`);
+					new Notice(`Task disappeared during sync - deleting from Todoist`);
+
+					// Delete from API immediately
+					syncBatchDelete(settings.todoistAPIToken, [realTID])
+						.catch(err => console.error('Failed to delete ghost task:', err));
+				}
+			}
+
+			return currentLines.join('\n');
+		});
+
+	} catch (error) {
+		console.error('Failed to create new tasks:', error);
+		new Notice(`Failed to create tasks: ${error instanceof Error ? error.message : 'Unknown error'}`);
+		throw error;
+	}
+}
+
+/**
+ * Process existing tasks: detect changes, resolve conflicts, apply updates.
+ * Implements bidirectional checking (File → DB).
+ * k-note lines 2376-2432
+ *
+ * @param file - File containing existing tasks
+ * @param existingTasks - Array of tasks with TIDs
+ * @param vault - Obsidian vault
+ * @param db - Database instance
+ * @param settings - Plugin settings
+ */
+async function processExistingTasks(
+	file: TFile,
+	existingTasks: Array<{ lineNum: number; line: string; tid: string | null }>,
+	vault: Vault,
+	db: Database,
+	settings: SyncSettings
+): Promise<void> {
+	console.log(`Processing ${existingTasks.length} existing tasks...`);
+
+	// Direction 1: File → DB
+	// Check each task in file, compare with DB state
+	for (const task of existingTasks) {
+		if (!task.tid) continue;  // Should not happen (filtered above)
+
+		const dbTask = db.getTask(task.tid);
+
+		if (!dbTask) {
+			// Task has TID but NOT in DB - moved from different file or orphaned
+			console.warn(`Task ${task.tid} not in DB, adding...`);
+
+			const taskData = parseTaskLine(task.line);
+			if (taskData) {
+				db.setTask(task.tid, {
+					tid: task.tid,
+					filepath: file.path,
+					content: taskData.content,
+					completed: taskData.completed,
+					dueDate: taskData.dueDate,
+					dueTime: taskData.dueTime,
+					dueDatetime: taskData.dueDatetime,
+					priority: taskData.priority,
+					duration: taskData.duration,
+					labels: taskData.labels,
+					lastSyncedAt: Date.now(),
+					pending_changes: []
+				});
+			}
+			continue;
+		}
+
+		// Task exists in DB - check if moved to this file
+		if (dbTask.filepath !== file.path) {
+			console.log(`Task ${task.tid} moved from ${dbTask.filepath} to ${file.path}`);
+			dbTask.filepath = file.path;
+		}
+
+		// Compare content with DB state - detect local changes
+		const currentTaskData = parseTaskLine(task.line);
+		if (!currentTaskData) {
+			console.warn(`Failed to parse task ${task.tid}`);
+			continue;
+		}
+
+		// Check if content changed
+		const contentChanged = currentTaskData.content !== dbTask.content;
+		const completedChanged = currentTaskData.completed !== dbTask.completed;
+		const dueDateChanged = currentTaskData.dueDate !== dbTask.dueDate;
+		const priorityChanged = currentTaskData.priority !== dbTask.priority;
+		const durationChanged = currentTaskData.duration !== dbTask.duration;
+
+		if (contentChanged || completedChanged || dueDateChanged || priorityChanged || durationChanged) {
+			// Local changes detected - add to pending_changes
+			console.log(`Local changes detected for task ${task.tid}`);
+
+			dbTask.pending_changes.push({
+				source: 'local',
+				timestamp: file.stat.mtime,  // Use file modification time
+				changes: {
+					content: currentTaskData.content,
+					completed: currentTaskData.completed,
+					dueDate: currentTaskData.dueDate,
+					dueDatetime: currentTaskData.dueDatetime,
+					priority: currentTaskData.priority,
+					duration: currentTaskData.duration,
+					labels: currentTaskData.labels
+				}
+			});
+		}
+	}
+
+	// Now resolve conflicts and apply updates
+	await resolveAndApplyUpdates(file, vault, db, settings);
+}
+
+/**
+ * Resolve conflicts and apply updates for all tasks with pending changes.
+ * Batch updates to Todoist, then write back to Obsidian.
+ *
+ * @param file - File to update
+ * @param vault - Obsidian vault
+ * @param db - Database instance
+ * @param settings - Plugin settings
+ */
+async function resolveAndApplyUpdates(
+	file: TFile,
+	vault: Vault,
+	db: Database,
+	settings: SyncSettings
+): Promise<void> {
+	// Get all tasks with pending changes
+	const tasksToUpdate = db.getModifiedTasks();
+
+	if (tasksToUpdate.length === 0) {
+		return;  // Nothing to update
+	}
+
+	console.log(`Resolving conflicts for ${tasksToUpdate.length} tasks...`);
+
+	// Resolve conflicts and collect updates
+	const apiUpdates: Array<{
+		id: string;
+		content?: string;
+		is_completed?: boolean;
+		labels?: string[];
+		due_date?: string;
+		due_datetime?: string;
+		priority?: number;
+		duration?: number;
+	}> = [];
+
+	const fileUpdates: Array<{ tid: string; newContent: string }> = [];
+
+	for (const [tid, task] of tasksToUpdate) {
+		// Resolve conflicts (returns winning change)
+		const resolution = resolveConflicts(task, settings);
+
+		if (!resolution) {
+			console.log(`No conflicts for task ${tid}, clearing pending changes`);
+			db.clearPendingChanges(tid);
+			continue;
+		}
+
+		console.log(`Resolved conflict for task ${tid}: ${resolution.source} wins`);
+
+		if (resolution.source === 'local') {
+			// Local wins - push to API
+			apiUpdates.push({
+				id: tid,
+				content: resolution.changes.content,
+				is_completed: resolution.changes.completed,
+				labels: resolution.changes.labels,
+				due_date: resolution.changes.dueDate,
+				due_datetime: resolution.changes.dueDatetime,
+				priority: resolution.changes.priority,
+				duration: resolution.changes.duration
+			});
+
+			// Update DB state with local changes
+			task.content = resolution.changes.content || task.content;
+			task.completed = resolution.changes.completed ?? task.completed;
+			task.dueDate = resolution.changes.dueDate;
+			task.dueDatetime = resolution.changes.dueDatetime;
+			task.priority = resolution.changes.priority;
+			task.duration = resolution.changes.duration;
+			task.labels = resolution.changes.labels || task.labels;
+
+		} else {
+			// API wins - update file
+			const updatedData: TaskData = {
+				content: resolution.changes.content || task.content,
+				completed: resolution.changes.completed ?? task.completed,
+				labels: resolution.changes.labels || task.labels,
+				dueDate: resolution.changes.dueDate,
+				dueDatetime: resolution.changes.dueDatetime,
+				priority: resolution.changes.priority,
+				duration: resolution.changes.duration,
+				tid: tid
+			};
+
+			fileUpdates.push({
+				tid,
+				newContent: buildTaskLine(updatedData, [])
+			});
+
+			// Update DB state with API changes
+			task.content = updatedData.content;
+			task.completed = updatedData.completed;
+			task.dueDate = updatedData.dueDate;
+			task.dueDatetime = updatedData.dueDatetime;
+			task.priority = updatedData.priority;
+			task.duration = updatedData.duration;
+			task.labels = updatedData.labels;
+		}
+
+		// Clear pending changes and update timestamp
+		task.pending_changes = [];
+		task.lastSyncedAt = Date.now();
+	}
+
+	// Apply API updates (batch)
+	if (apiUpdates.length > 0) {
+		try {
+			console.log(`Pushing ${apiUpdates.length} updates to Todoist...`);
+			const response = await syncBatchUpdate(settings.todoistAPIToken, apiUpdates);
+			settings.syncToken = response.sync_token;
+			console.log('API updates successful');
+		} catch (error) {
+			console.error('Failed to push updates to API:', error);
+			new Notice(`Failed to sync to Todoist: ${error instanceof Error ? error.message : 'Unknown error'}`);
+		}
+	}
+
+	// Apply file updates (one by one with vault.process)
+	// k-note lines 1599-1644
+	for (const update of fileUpdates) {
+		try {
+			await vault.process(file, (content) => {
+				const lines = content.split('\n');
+				const tidPattern = new RegExp(`%%\\[tid:: \\[${update.tid}\\]`);
+
+				// Search for task by TID in file AGAIN (might have moved)
+				for (let i = 0; i < lines.length; i++) {
+					if (tidPattern.test(lines[i])) {
+						// Found task - update it
+						lines[i] = update.newContent;
+						console.log(`Updated task ${update.tid} in file`);
+						break;
+					}
+				}
+
+				return lines.join('\n');
+			});
+		} catch (error) {
+			console.error(`Failed to update task ${update.tid} in file:`, error);
+			// Continue with next task
+		}
+	}
+}
+
+/**
+ * Bidirectional check: DB → File
+ * Detects tasks that moved out of file or were deleted.
+ * k-note lines 2677-2683
+ *
+ * @param file - Current file
+ * @param vault - Obsidian vault
+ * @param metadataCache - Metadata cache
+ * @param db - Database instance
+ */
+async function bidirectionalCheck(
+	file: TFile,
+	vault: Vault,
+	metadataCache: MetadataCache,
+	db: Database
+): Promise<void> {
+	console.log(`Bidirectional check for file: ${file.path}`);
+
+	// Get all DB tasks for this file
+	const dbTasksForFile = db.getTasksForFile(file.path);
+
+	if (dbTasksForFile.length === 0) {
+		return;  // No tasks in DB for this file
+	}
+
+	// Read file again to check which tasks are actually present
+	const content = await vault.cachedRead(file);
+	const lines = content.split('\n');
+
+	// Collect TIDs present in file
+	const tidsInFile = new Set<string>();
+	for (const line of lines) {
+		const tid = extractTID(line);
+		if (tid) {
+			tidsInFile.add(tid);
+		}
+	}
+
+	// Check each DB task - is it in file?
+	for (const [tid, dbTask] of dbTasksForFile) {
+		if (!tidsInFile.has(tid)) {
+			// Task in DB but NOT in file - moved or deleted!
+			console.log(`Task ${tid} not found in file, searching vault...`);
+
+			// Vault-wide TID search
+			const newLocation = await searchVaultForTID(tid, vault, metadataCache, file);
+
+			if (newLocation) {
+				// Task MOVED to different file
+				console.log(`Task ${tid} moved from ${file.path} to ${newLocation.path}`);
+				dbTask.filepath = newLocation.path;
+			} else {
+				// Task DELETED from Obsidian
+				console.log(`Task ${tid} deleted from vault`);
+				dbTask.pending_changes.push({
+					source: 'local',
+					timestamp: Date.now(),
+					changes: { deleted: true }
+				});
+			}
+		}
+	}
+}
+
+/**
+ * Search vault-wide for TID (moved task detection).
+ * Only searches files with todoist-sync: true frontmatter.
+ * Uses chunking + yielding to avoid blocking UI.
+ * k-note lines 2858-2882
+ *
+ * @param tid - Task ID to search for
+ * @param vault - Obsidian vault
+ * @param metadataCache - Metadata cache
+ * @param excludeFile - File to exclude from search (current file)
+ * @returns File containing TID, or null if not found
+ */
+export async function searchVaultForTID(
+	tid: string,
+	vault: Vault,
+	metadataCache: MetadataCache,
+	excludeFile: TFile
+): Promise<TFile | null> {
+	console.log(`Searching vault for TID: ${tid}`);
+
+	// Get all files with todoist-sync: true (pre-filter)
+	const allFiles = vault.getMarkdownFiles();
+	const syncFiles = allFiles.filter(f => {
+		if (f.path === excludeFile.path) return false;  // Exclude current file
+
+		const cache = metadataCache.getFileCache(f);
+		return cache?.frontmatter?.['todoist-sync'] === true;
+	});
+
+	console.log(`Searching ${syncFiles.length} sync-enabled files...`);
+
+	// TID pattern
+	const tidPattern = new RegExp(`%%\\[tid:: \\[${tid}\\]`);
+
+	// Chunk processing: 30 files per chunk
+	const CHUNK_SIZE = 30;
+
+	for (let i = 0; i < syncFiles.length; i += CHUNK_SIZE) {
+		const chunk = syncFiles.slice(i, i + CHUNK_SIZE);
+
+		for (const file of chunk) {
+			try {
+				const content = await vault.cachedRead(file);
+
+				if (tidPattern.test(content)) {
+					console.log(`Found TID ${tid} in file: ${file.path}`);
+					return file;
+				}
+			} catch (error) {
+				console.error(`Error reading file ${file.path}:`, error);
+				// Continue searching
+			}
+		}
+
+		// Yield to UI after each chunk
+		await nextFrame();
+	}
+
+	console.log(`TID ${tid} not found in vault`);
+	return null;
+}
