@@ -35,8 +35,7 @@ export class TodoistSettingTab extends PluginSettingTab {
 			.addButton(button => button
 				.setButtonText('Test Connection')
 				.onClick(async () => {
-					// Will implement in Phase 3 (API client)
-					console.log('Test connection - to be implemented');
+					await this.plugin.testAPIConnection();
 				}));
 
 		// Scheduled Sync section
@@ -50,7 +49,8 @@ export class TodoistSettingTab extends PluginSettingTab {
 				.onChange(async (value) => {
 					this.plugin.settings.enableScheduledSync = value;
 					await this.plugin.saveSettings();
-					// Will restart sync interval in Phase 5
+					// Restart sync interval with new setting
+					this.plugin.restartScheduledSync();
 				}));
 
 		new Setting(containerEl)
@@ -64,7 +64,8 @@ export class TodoistSettingTab extends PluginSettingTab {
 					if (!isNaN(num) && num >= 20) {
 						this.plugin.settings.syncInterval = num;
 						await this.plugin.saveSettings();
-						// Will restart sync interval in Phase 5
+						// Restart sync interval with new setting
+						this.plugin.restartScheduledSync();
 					}
 				}));
 
