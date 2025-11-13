@@ -1084,11 +1084,18 @@ export class TodoistSync {
 	) {
 		// 获取未同步的事件
 		try {
+			console.log(`[Sync Debug] syncCompletedTaskStatusToObsidian called with ${unSynchronizedEvents.length} events`);
 			// 处理未同步的事件并等待所有处理完成
 			const processedEvents = [];
 			for (const e of unSynchronizedEvents) {
+				console.log(`[Sync Debug] Processing completed task: ${e.object_id}`);
 				//如果要修改代码，让completeTaskInTheFile(e.object_id)按照顺序依次执行，可以将Promise.allSettled()方法改为使用for...of循环来处理未同步的事件。具体步骤如下：
-				await this.plugin.fileOperation?.completeTaskInTheFile(e.object_id);
+				try {
+					await this.plugin.fileOperation?.completeTaskInTheFile(e.object_id);
+					console.log(`[Sync Debug] File updated for task ${e.object_id}`);
+				} catch (fileError) {
+					console.error(`[Sync Debug] Error updating file for task ${e.object_id}:`, fileError);
+				}
 				await this.plugin.cacheOperation?.closeTaskToCacheByID(e.object_id);
 				new Notice(`Task ${e.object_id} is closed.`);
 				processedEvents.push(e);
@@ -1237,6 +1244,8 @@ export class TodoistSync {
 			const all_activity_events =
 				await this.plugin.todoistNewAPI?.getNonObsidianAllActivityEvents();
 
+			console.log(`[Sync Debug] Total events from Todoist: ${all_activity_events?.length ?? 0}`);
+
 			// remove synchronized events
 			const savedEvents = this.plugin.cacheOperation?.loadEventsFromCache();
 			const result1 =
@@ -1245,11 +1254,29 @@ export class TodoistSync {
 						!savedEvents?.some((objB: TodoistEvent) => objB.id === objA.id),
 				) ?? [];
 
+			console.log(`[Sync Debug] New events (not in cache): ${result1.length}`);
+			console.log(`[Sync Debug] Event types:`, result1.map(e => `${e.event_type}:${e.object_type}`));
+
 			const savedTasks = this.plugin.cacheOperation?.loadTasksFromCache();
+			console.log(`[Sync Debug] Tasks in cache: ${savedTasks?.length ?? 0}`);
+			console.log(`[Sync Debug] Cached task IDs:`, savedTasks?.map(t => t.id).slice(0, 10));
+
 			// Find the task activity whose task id exists in Obsidian
 			const result2 = result1.filter((objA: TodoistEvent) =>
 				savedTasks?.some((objB: Task) => objB.id === objA.object_id),
 			);
+
+			console.log(`[Sync Debug] Events for cached tasks: ${result2.length}`);
+			console.log(`[Sync Debug] Event object_ids:`, result2.map(e => e.object_id).slice(0, 10));
+
+			// Show which events were filtered OUT
+			const filteredOut = result1.filter((objA: TodoistEvent) =>
+				!savedTasks?.some((objB: Task) => objB.id === objA.object_id)
+			);
+			if (filteredOut.length > 0) {
+				console.log(`[Sync Debug] ${filteredOut.length} events filtered out (task not in cache)`);
+				console.log(`[Sync Debug] Filtered event types:`, filteredOut.map(e => `${e.event_type}:${e.object_type} (${e.object_id})`).slice(0, 5));
+			}
 
 			// Find the task id that exists in the note activity in Obsidian
 			const result3 = result1.filter((objA: TodoistEvent) =>
@@ -1261,11 +1288,14 @@ export class TodoistSync {
 					event_type: "completed",
 					object_type: "item",
 				});
+			console.log(`[Sync Debug] Completed events to process: ${not_synchronized_item_completed_events?.length ?? 0}`);
+
 			const not_synchronized_item_uncompleted_events =
 				this.plugin.todoistNewAPI?.filterActivityEvents(result2, {
 					event_type: "uncompleted",
 					object_type: "item",
 				});
+			console.log(`[Sync Debug] Uncompleted events to process: ${not_synchronized_item_uncompleted_events?.length ?? 0}`);
 
 			//Items updated (only changes to content, description, due_date and responsible_uid)
 			const not_synchronized_item_updated_events =
@@ -1273,6 +1303,7 @@ export class TodoistSync {
 					event_type: "updated",
 					object_type: "item",
 				});
+			console.log(`[Sync Debug] Updated events to process: ${not_synchronized_item_updated_events?.length ?? 0}`);
 
 			const not_synchronized_notes_added_events =
 				this.plugin.todoistNewAPI?.filterActivityEvents(result3, {

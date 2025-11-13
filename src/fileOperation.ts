@@ -59,17 +59,77 @@ export class FileOperation {
 		return { modifiedLines, wasModified };
 	}
 
+	// Helper: Get editor view for a file (if currently open)
+	private getEditorForFile(filepath: string) {
+		const leaves = this.app.workspace.getLeavesOfType('markdown');
+		for (const leaf of leaves) {
+			const view = leaf.view;
+			if (view instanceof MarkdownView && view.file?.path === filepath) {
+				return view.editor;
+			}
+		}
+		return null;
+	}
+
 	// Complete a task to mark it as completed
 	async completeTaskInTheFile(taskId: string) {
+		console.log(`[File Debug] completeTaskInTheFile called for task: ${taskId}`);
 		// Get the task file path
 		const currentTask =
 			await this.plugin.cacheOperation?.loadTaskFromCacheID(taskId);
 		const filepath = currentTask?.path;
-		if (!filepath) return;
-		const file = this.app.vault.getAbstractFileByPath(filepath);
-		if (!(file instanceof TFile)) return;
+		console.log(`[File Debug] Task filepath from cache: ${filepath}`);
+		if (!filepath) {
+			console.log(`[File Debug] No filepath found for task ${taskId}, returning`);
+			return;
+		}
 
-		// Use vault.process for non-blocking file modification
+		// Check if file is currently open in an editor
+		const editor = this.getEditorForFile(filepath);
+		if (editor) {
+			console.log(`[File Debug] File is open in editor, updating via both editor and vault`);
+			// Update editor first for immediate visual feedback
+			const content = editor.getValue();
+			const lines = content.split("\n");
+			let foundInEditor = false;
+
+			for (let i = 0; i < lines.length; i++) {
+				const line = lines[i];
+				if (
+					line.includes(taskId) &&
+					this.plugin.taskParser?.hasTodoistTag(line)
+				) {
+					console.log(`[File Debug] Found task on line ${i}, updating editor`);
+					const newLine = line.replace("[ ]", "[x]");
+					editor.replaceRange(
+						newLine,
+						{ line: i, ch: 0 },
+						{ line: i, ch: line.length }
+					);
+					console.log(`[File Debug] Editor updated for immediate visual feedback`);
+					foundInEditor = true;
+					break;
+				}
+			}
+
+			if (!foundInEditor) {
+				console.log(`[File Debug] Task not found in editor content`);
+			}
+
+			// Continue to also update file on disk (don't return early!)
+			// This ensures the change persists even if editor isn't saved
+			console.log(`[File Debug] Also updating file on disk for persistence`);
+		}
+
+		// File is not open - use vault.process to modify on disk
+		console.log(`[File Debug] File not open, using vault.process`);
+		const file = this.app.vault.getAbstractFileByPath(filepath);
+		if (!(file instanceof TFile)) {
+			console.log(`[File Debug] File not found or not a TFile: ${filepath}`);
+			return;
+		}
+
+		console.log(`[File Debug] Processing file: ${filepath}`);
 		await this.app.vault.process(file, (content) => {
 			const lines = content.split("\n");
 			let modified = false;
@@ -80,23 +140,65 @@ export class FileOperation {
 					line.includes(taskId) &&
 					this.plugin.taskParser?.hasTodoistTag(line)
 				) {
+					console.log(`[File Debug] Found task on line ${i}, marking as complete`);
 					lines[i] = line.replace("[ ]", "[x]");
 					modified = true;
 					break;
 				}
 			}
 
+			console.log(`[File Debug] File modification result: ${modified ? 'modified' : 'not modified'}`);
 			return modified ? lines.join("\n") : content;
 		});
 	}
 
 	// uncheck Completed tasks，
 	async incompleteTaskInTheFile(taskId: string) {
+		console.log(`[File Debug] incompleteTaskInTheFile called for task: ${taskId}`);
 		// Get the task file path
 		const currentTask =
 			await this.plugin.cacheOperation?.loadTaskFromCacheID(taskId);
 		const filepath = currentTask?.path;
 		if (!filepath) return;
+
+		// Check if file is currently open in an editor
+		const editor = this.getEditorForFile(filepath);
+		if (editor) {
+			console.log(`[File Debug] File is open in editor, updating via both editor and vault`);
+			// Update editor first for immediate visual feedback
+			const content = editor.getValue();
+			const lines = content.split("\n");
+			let foundInEditor = false;
+
+			for (let i = 0; i < lines.length; i++) {
+				const line = lines[i];
+				if (
+					line.includes(taskId) &&
+					this.plugin.taskParser?.hasTodoistTag(line)
+				) {
+					console.log(`[File Debug] Found task on line ${i}, updating editor (uncomplete)`);
+					const newLine = line.replace(/- \[(x|X)\]/g, "- [ ]");
+					editor.replaceRange(
+						newLine,
+						{ line: i, ch: 0 },
+						{ line: i, ch: line.length }
+					);
+					console.log(`[File Debug] Editor updated for immediate visual feedback (uncomplete)`);
+					foundInEditor = true;
+					break;
+				}
+			}
+
+			if (!foundInEditor) {
+				console.log(`[File Debug] Task not found in editor content`);
+			}
+
+			// Continue to also update file on disk (don't return early!)
+			console.log(`[File Debug] Also updating file on disk for persistence`);
+		}
+
+		// File is not open - use vault.process to modify on disk
+		console.log(`[File Debug] File not open, using vault.process`);
 		const file = this.app.vault.getAbstractFileByPath(filepath);
 		if (!(file instanceof TFile)) return;
 
