@@ -122,7 +122,8 @@ export interface ApiCommand {
 		content?: string;
 		is_completed?: boolean;
 		labels?: string[];
-		due?: { date: string; datetime?: string };
+		project_id?: string;
+		due?: { date?: string; datetime?: string };
 		priority?: number;
 		duration?: { amount: number; unit: string };
 	};
