@@ -37,3 +37,5 @@ src/fileOperation.js
 
 # Claude
 .claude
+
+.old
