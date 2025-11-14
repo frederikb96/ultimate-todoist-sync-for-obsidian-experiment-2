@@ -337,14 +337,16 @@ async function resolveAndApplyUpdates(
 	db: Database,
 	settings: SyncSettings
 ): Promise<void> {
-	// Get all tasks with pending changes
-	const tasksToUpdate = db.getModifiedTasks();
+	// Get all tasks with pending changes FOR THIS FILE ONLY!
+	// CRITICAL: Don't process tasks from other files - they'll be handled when those files are processed
+	const allModifiedTasks = db.getModifiedTasks();
+	const tasksToUpdate = allModifiedTasks.filter(([_, task]) => task.filepath === file.path);
 
 	if (tasksToUpdate.length === 0) {
-		return;  // Nothing to update
+		return;  // Nothing to update for this file
 	}
 
-	console.log(`Resolving conflicts for ${tasksToUpdate.length} tasks...`);
+	console.log(`Resolving conflicts for ${tasksToUpdate.length} tasks in file ${file.path}...`);
 
 	// Resolve conflicts and collect updates
 	const apiUpdates: Array<{
