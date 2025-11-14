@@ -138,6 +138,11 @@ export async function syncBatchCreate(
 /**
  * Batch update multiple tasks.
  *
+ * CRITICAL: Todoist API does NOT support changing completion state via item_update!
+ * - Use item_complete command to check tasks
+ * - Use item_uncomplete command to uncheck tasks
+ * - Use item_update for all other fields
+ *
  * @param apiToken - Todoist API token
  * @param updates - Array of task updates
  * @returns SyncResponse with new sync_token
@@ -147,7 +152,7 @@ export async function syncBatchUpdate(
 	updates: Array<{
 		id: string;
 		content?: string;
-		checked?: boolean;  // API field is "checked" not "is_completed"
+		checked?: boolean;
 		labels?: string[];
 		due_date?: string;
 		due_datetime?: string;
@@ -163,48 +168,77 @@ export async function syncBatchUpdate(
 		throw new Error('Cannot update more than 100 tasks in single batch');
 	}
 
-	// Build commands array with item_update
-	const commands: ApiCommand[] = updates.map(update => {
-		const args: ApiCommand['args'] = {
-			id: update.id
-		};
+	const commands: ApiCommand[] = [];
 
-		if (update.content !== undefined) {
-			args.content = update.content;
-		}
-
+	for (const update of updates) {
+		// Check if this update changes completion state
 		if (update.checked !== undefined) {
-			args.checked = update.checked;
+			// Separate command for completion state
+			if (update.checked === true) {
+				// Complete task
+				commands.push({
+					type: 'item_complete',
+					uuid: uuidv4(),
+					args: { id: update.id }
+				});
+			} else {
+				// Uncomplete task
+				commands.push({
+					type: 'item_uncomplete',
+					uuid: uuidv4(),
+					args: { id: update.id }
+				});
+			}
 		}
 
-		if (update.labels !== undefined) {
-			args.labels = update.labels;
-		}
+		// Check if there are other fields to update (besides checked)
+		const hasOtherUpdates =
+			update.content !== undefined ||
+			update.labels !== undefined ||
+			update.due_date !== undefined ||
+			update.due_datetime !== undefined ||
+			update.priority !== undefined ||
+			update.duration !== undefined;
 
-		// Due date handling
-		if (update.due_datetime) {
-			args.due = { datetime: update.due_datetime };
-		} else if (update.due_date) {
-			args.due = { date: update.due_date };
-		}
-
-		if (update.priority !== undefined) {
-			args.priority = update.priority;
-		}
-
-		if (update.duration !== undefined) {
-			args.duration = {
-				amount: update.duration,
-				unit: 'minute'
+		if (hasOtherUpdates) {
+			// Build item_update command for non-completion fields
+			const args: ApiCommand['args'] = {
+				id: update.id
 			};
-		}
 
-		return {
-			type: 'item_update',
-			uuid: uuidv4(),
-			args
-		};
-	});
+			if (update.content !== undefined) {
+				args.content = update.content;
+			}
+
+			if (update.labels !== undefined) {
+				args.labels = update.labels;
+			}
+
+			// Due date handling
+			if (update.due_datetime) {
+				args.due = { datetime: update.due_datetime };
+			} else if (update.due_date) {
+				args.due = { date: update.due_date };
+			}
+
+			if (update.priority !== undefined) {
+				args.priority = update.priority;
+			}
+
+			if (update.duration !== undefined) {
+				args.duration = {
+					amount: update.duration,
+					unit: 'minute'
+				};
+			}
+
+			commands.push({
+				type: 'item_update',
+				uuid: uuidv4(),
+				args
+			});
+		}
+	}
 
 	const response = await todoistSyncRequest(apiToken, {
 		commands: JSON.stringify(commands),

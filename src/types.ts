@@ -126,17 +126,18 @@ export interface TodoistTask {
 
 // API command for batch operations
 export interface ApiCommand {
-	type: 'item_add' | 'item_update' | 'item_delete';
+	type: 'item_add' | 'item_update' | 'item_delete' | 'item_complete' | 'item_uncomplete';
 	temp_id?: string;
 	uuid: string;
 	args: {
 		id?: string;
 		content?: string;
-		checked?: boolean;  // API field name is "checked" not "is_completed"
+		checked?: boolean;  // NOTE: NOT used in item_update! Completion requires item_complete/item_uncomplete commands
 		labels?: string[];
 		project_id?: string;
 		due?: { date?: string; datetime?: string };
 		priority?: number;
 		duration?: { amount: number; unit: string };
+		date_completed?: string;  // For item_complete command (optional)
 	};
 }
