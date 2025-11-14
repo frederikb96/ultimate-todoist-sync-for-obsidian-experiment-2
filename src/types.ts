@@ -99,6 +99,8 @@ export interface TodoistTask {
 	id: string;
 	content: string;
 	checked: boolean;  // Completion status (API field name is "checked" not "is_completed")
+	is_deleted: boolean;  // Whether task is marked as deleted
+	updated_at: string;  // Last modification timestamp (RFC3339 format in UTC)
 	due?: {
 		date: string;
 		datetime?: string;

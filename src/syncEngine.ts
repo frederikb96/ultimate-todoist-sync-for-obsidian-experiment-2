@@ -154,28 +154,45 @@ export async function pullFromTodoist(
 			const dbTask = db.getTask(apiTask.id);
 
 			if (dbTask) {
-				// Task exists in DB - add pending change from API
-				dbTask.pending_changes.push({
-					source: 'api',
-					timestamp: Date.now(),
-					changes: {
-						content: apiTask.content,
-						completed: apiTask.checked,  // API field is "checked" not "is_completed"
-						labels: apiTask.labels,
-						dueDate: apiTask.due?.date,
-						dueDatetime: apiTask.due?.datetime,
-						priority: apiTask.priority,
-						duration: apiTask.duration?.amount
-					}
-				});
+				// Convert API timestamp (RFC3339 UTC string) to milliseconds
+				const apiTimestamp = new Date(apiTask.updated_at).getTime();
 
-				console.log(`Task ${apiTask.id} has API changes`, {
-					content: apiTask.content
-				});
+				// Check if task was deleted on Todoist
+				if (apiTask.is_deleted) {
+					console.log(`Task ${apiTask.id} deleted on Todoist`);
+
+					// Add pending deletion change from API
+					dbTask.pending_changes.push({
+						source: 'api',
+						timestamp: apiTimestamp,
+						changes: {
+							deleted: true
+						}
+					});
+				} else {
+					// Task modified (not deleted) - add pending change from API
+					dbTask.pending_changes.push({
+						source: 'api',
+						timestamp: apiTimestamp,
+						changes: {
+							content: apiTask.content,
+							completed: apiTask.checked,  // API field is "checked" not "is_completed"
+							labels: apiTask.labels,
+							dueDate: apiTask.due?.date,
+							dueDatetime: apiTask.due?.datetime,
+							priority: apiTask.priority,
+							duration: apiTask.duration?.amount
+						}
+					});
+
+					console.log(`Task ${apiTask.id} has API changes`, {
+						content: apiTask.content
+					});
+				}
 			} else {
 				// Task NOT in our DB - skip with warning
 				// Only warn if it has tdsync label (should be in DB)
-				if (apiTask.labels?.includes('tdsync')) {
+				if (!apiTask.is_deleted && apiTask.labels?.includes('tdsync')) {
 					console.warn(
 						`Task ${apiTask.id} has tdsync label but not in DB - orphaned task?`,
 						{ content: apiTask.content }
