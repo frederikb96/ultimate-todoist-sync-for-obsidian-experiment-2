@@ -18,7 +18,7 @@ main.js
 # Exclude the release folder
 release
 release.zip
-another-simple-todoist-sync.zip
+another-even-simpler-todoist-sync.zip
 
 # obsidian
 data.json
@@ -26,16 +26,9 @@ userData
 
 # Exclude macOS Finder (System Explorer) View States
 .DS_Store
-src/cacheOperation.js
-src/todoistSyncAPI.js
-src/todoistRestAPI.js
-src/taskParser.js
-src/syncModule.js
-src/settings.js
-src/modal.js
-src/fileOperation.js
 
 # Claude
 .claude
 
+# Old implementation
 .old
