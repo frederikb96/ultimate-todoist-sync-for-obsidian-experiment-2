@@ -14,6 +14,16 @@ export interface SyncSettings {
 	defaultProjectId: string;
 	defaultProjectName: string;
 
+	// Projects cache (fetched from API)
+	projects: Array<{
+		id: string;
+		name: string;
+		inbox_project?: boolean;
+		is_archived: boolean;
+		is_deleted: boolean;
+		child_order: number;
+	}>;
+
 	// User Data (from Todoist API)
 	userData: {
 		email: string;

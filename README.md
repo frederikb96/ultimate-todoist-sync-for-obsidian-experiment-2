@@ -19,6 +19,7 @@ npm install
 npm run build
 
 # Install to Obsidian
+mkdir -p ~/path/to/vault/.obsidian/plugins/another-even-simpler-todoist-sync
 cp main.js manifest.json styles.css ~/path/to/vault/.obsidian/plugins/another-even-simpler-todoist-sync/
 ```
 

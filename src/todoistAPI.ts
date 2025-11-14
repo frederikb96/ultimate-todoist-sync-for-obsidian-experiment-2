@@ -273,17 +273,38 @@ export async function testConnection(
 		lang: string;
 		tz_info: { timezone: string; gmt_string: string };
 	};
+	projects?: Array<{
+		id: string;
+		name: string;
+		inbox_project?: boolean;
+		is_archived: boolean;
+		is_deleted: boolean;
+		child_order: number;
+	}>;
 	error?: string;
 }> {
 	try {
-		// Simple sync with "*" token to validate
+		// Fetch both user and projects data
 		const response = await todoistSyncRequest(apiToken, {
 			sync_token: '*',
-			resource_types: JSON.stringify(['user'])
+			resource_types: JSON.stringify(['user', 'projects'])
 		});
 
 		// Extract user data from response
 		if (response.user) {
+			// Filter active projects only (exclude deleted/archived)
+			const activeProjects = (response.projects || [])
+				.filter((p: any) => !p.is_deleted && !p.is_archived)
+				.map((p: any) => ({
+					id: p.id,
+					name: p.name,
+					inbox_project: p.inbox_project,
+					is_archived: p.is_archived,
+					is_deleted: p.is_deleted,
+					child_order: p.child_order
+				}))
+				.sort((a: any, b: any) => a.child_order - b.child_order);
+
 			return {
 				success: true,
 				userData: {
@@ -294,7 +315,8 @@ export async function testConnection(
 						timezone: response.user.tz_info?.timezone || 'UTC',
 						gmt_string: response.user.tz_info?.gmt_string || '+00:00'
 					}
-				}
+				},
+				projects: activeProjects
 			};
 		}
 

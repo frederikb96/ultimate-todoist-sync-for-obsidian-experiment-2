@@ -9,6 +9,7 @@ import { runMigration } from './migration';
 export default class TodoistSyncPlugin extends Plugin {
 	settings: SyncSettings;
 	db: Database;
+	settingTab: TodoistSettingTab;
 	syncIntervalId: number | null = null;
 	isSyncInProgress = false;
 
@@ -19,8 +20,9 @@ export default class TodoistSyncPlugin extends Plugin {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
 		this.db = new Database(this.settings);
 
-		// Add settings tab
-		this.addSettingTab(new TodoistSettingTab(this.app, this));
+		// Add settings tab and store reference
+		this.settingTab = new TodoistSettingTab(this.app, this);
+		this.addSettingTab(this.settingTab);
 
 		// Register commands
 		this.registerCommands();
@@ -169,14 +171,29 @@ export default class TodoistSyncPlugin extends Plugin {
 			// Call test connection API
 			const result = await testConnection(this.settings.todoistAPIToken);
 
-			if (result.success && result.userData) {
+			if (result.success && result.userData && result.projects) {
 				// Update settings with user data
 				this.settings.userData = result.userData;
+				this.settings.projects = result.projects;
 				this.settings.apiInitialized = true;
+
+				// Set default project to Inbox
+				const inbox = result.projects.find(p => p.inbox_project);
+				if (inbox) {
+					this.settings.defaultProjectId = inbox.id;
+					this.settings.defaultProjectName = inbox.name;
+				}
+
 				await this.saveSettings();
 
 				new Notice(`Connected as ${result.userData.full_name} (${result.userData.email})`);
-				console.log('API connection successful:', result.userData);
+				console.log('API connection successful:', {
+					userData: result.userData,
+					projects: result.projects.length
+				});
+
+				// Force settings UI refresh to enable Import button and show projects
+				this.settingTab.display();
 			} else {
 				throw new Error(result.error || 'Unknown error');
 			}

@@ -101,10 +101,28 @@ export class TodoistSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName('Default Project')
 			.setDesc('Default project for new tasks (fetched from Todoist)')
-			.addText(text => text
-				.setPlaceholder('Inbox')
-				.setValue(this.plugin.settings.defaultProjectName)
-				.setDisabled(true));
+			.addDropdown(dropdown => {
+				// Populate dropdown with projects
+				if (this.plugin.settings.projects.length > 0) {
+					this.plugin.settings.projects.forEach(project => {
+						dropdown.addOption(project.id, project.name);
+					});
+					dropdown.setValue(this.plugin.settings.defaultProjectId);
+				} else {
+					// No projects loaded yet
+					dropdown.addOption('', 'No projects loaded');
+					dropdown.setDisabled(true);
+				}
+
+				dropdown.onChange(async (value) => {
+					const selectedProject = this.plugin.settings.projects.find(p => p.id === value);
+					if (selectedProject) {
+						this.plugin.settings.defaultProjectId = selectedProject.id;
+						this.plugin.settings.defaultProjectName = selectedProject.name;
+						await this.plugin.saveSettings();
+					}
+				});
+			});
 
 		// Conflict Resolution section
 		containerEl.createEl('h3', { text: 'Conflict Resolution' });

@@ -14,6 +14,9 @@ export const DEFAULT_SETTINGS: SyncSettings = {
 	defaultProjectId: '',
 	defaultProjectName: 'Inbox',
 
+	// Projects cache
+	projects: [],
+
 	// User Data
 	userData: {
 		email: '',
