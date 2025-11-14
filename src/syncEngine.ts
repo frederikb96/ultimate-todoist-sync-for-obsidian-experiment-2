@@ -5,7 +5,7 @@ import { TFile, Vault, MetadataCache, Workspace, Plugin, Notice } from 'obsidian
 import { Database } from './database';
 import { SyncSettings } from './types';
 import { nextFrame, sleep, convertDurationToMinutes } from './utils';
-import { syncPull } from './todoistAPI';
+import { syncPull, fetchCompletedTasks } from './todoistAPI';
 import { processFile } from './syncProcessor';
 
 /**
@@ -189,18 +189,47 @@ export async function pullFromTodoist(
 		// Call Sync API with current sync_token
 		const response = await syncPull(settings.todoistAPIToken, settings.syncToken);
 
-		console.log(`Received ${response.items.length} modified tasks from API`, {
+		console.log(`Received ${response.items.length} active tasks from Sync API`, {
 			fullSync: response.full_sync
 		});
 
 		// Update sync token for next sync
 		settings.syncToken = response.sync_token;
 
+		// On initial sync (full_sync), also fetch completed tasks
+		// Sync API with sync_token="*" only returns ACTIVE tasks, NOT completed tasks
+		let completedTasks: any[] = [];
+		if (response.full_sync) {
+			console.log('Initial sync detected - fetching completed tasks from last 3 months...');
+
+			// Calculate date range (3 months back from now)
+			const now = new Date();
+			const threeMonthsAgo = new Date();
+			threeMonthsAgo.setMonth(now.getMonth() - 3);
+
+			// Format dates as RFC3339 (ISO 8601)
+			const since = threeMonthsAgo.toISOString();
+			const until = now.toISOString();
+
+			// Fetch all completed tasks (handles pagination internally)
+			completedTasks = await fetchCompletedTasks(settings.todoistAPIToken, since, until);
+			console.log(`Received ${completedTasks.length} completed tasks from REST API`);
+
+			// Show notice to user
+			if (completedTasks.length > 0) {
+				new Notice(`Initial sync: Found ${response.items.length} active + ${completedTasks.length} completed tasks`);
+			}
+		}
+
+		// Combine active + completed tasks for processing
+		const allTasks = [...response.items, ...completedTasks];
+		console.log(`Processing ${allTasks.length} total tasks (${response.items.length} active + ${completedTasks.length} completed)`);
+
 		// Track orphaned tasks (in Todoist with tdsync but not in our DB)
 		const orphanedTasks: string[] = [];
 
-		// Process each modified task from API
-		for (const apiTask of response.items) {
+		// Process each modified task from API (both active and completed)
+		for (const apiTask of allTasks) {
 			// Filter by TID (NOT label!) - k-note lines 2447-2471
 			// Check if this task exists in our DB
 			const dbTask = db.getTask(apiTask.id);

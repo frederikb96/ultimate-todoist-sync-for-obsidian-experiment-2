@@ -3,10 +3,11 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { Notice } from 'obsidian';
-import type { SyncResponse, TodoistTask, ApiCommand } from './types';
+import type { SyncResponse, TodoistTask, ApiCommand, CompletedTasksResponse } from './types';
 
-// Todoist Sync API endpoint
+// Todoist API endpoints
 const SYNC_API_URL = 'https://api.todoist.com/api/v1/sync';
+const COMPLETED_TASKS_URL = 'https://api.todoist.com/api/v1/tasks/completed/by_completion_date';
 
 /**
  * Pull modified tasks from Todoist (incremental sync).
@@ -50,6 +51,88 @@ export async function syncPull(
 		}
 
 		throw error;
+	}
+}
+
+/**
+ * Fetch completed tasks from Todoist using REST API.
+ * Handles pagination automatically to fetch all completed tasks in the date range.
+ *
+ * Use this for initial sync to reconcile completion state differences.
+ * Todoist Sync API with sync_token="*" only returns ACTIVE tasks, NOT completed tasks.
+ *
+ * @param apiToken - Todoist API token
+ * @param since - Start date (RFC3339 format, e.g., "2025-01-01T00:00:00Z")
+ * @param until - End date (RFC3339 format, max 3 months from since)
+ * @returns Array of completed TodoistTask objects
+ */
+export async function fetchCompletedTasks(
+	apiToken: string,
+	since: string,
+	until: string
+): Promise<TodoistTask[]> {
+	const allTasks: TodoistTask[] = [];
+	let cursor: string | null = null;
+	let pageCount = 0;
+
+	try {
+		console.log('Fetching completed tasks...', { since, until });
+
+		do {
+			pageCount++;
+			console.log(`Fetching completed tasks page ${pageCount}...`);
+
+			// Build query parameters
+			const params = new URLSearchParams({
+				since,
+				until
+			});
+
+			// Add cursor for pagination (skip first page)
+			if (cursor) {
+				params.append('cursor', cursor);
+			}
+
+			// Make REST API request
+			const response = await fetch(`${COMPLETED_TASKS_URL}?${params.toString()}`, {
+				method: 'GET',
+				headers: {
+					'Authorization': `Bearer ${apiToken}`
+				}
+			});
+
+			// Handle errors
+			if (!response.ok) {
+				const errorText = await response.text();
+				throw new Error(`Completed tasks API error (${response.status}): ${errorText}`);
+			}
+
+			// Parse response
+			const data: CompletedTasksResponse = await response.json();
+
+			// Accumulate tasks
+			allTasks.push(...data.items);
+			console.log(`  Received ${data.items.length} tasks (total: ${allTasks.length})`);
+
+			// Update cursor for next page
+			cursor = data.next_cursor;
+
+			// Safety limit to prevent infinite loops
+			if (pageCount > 50) {
+				console.warn('Reached 50 pages while fetching completed tasks, stopping pagination');
+				break;
+			}
+
+		} while (cursor !== null);
+
+		console.log(`Completed task fetch finished: ${allTasks.length} tasks from ${pageCount} pages`);
+		return allTasks;
+
+	} catch (error) {
+		console.error('Failed to fetch completed tasks:', error);
+		// Don't throw - allow sync to continue with active tasks only
+		new Notice('Warning: Could not fetch completed tasks - sync continues with active tasks only');
+		return [];  // Return empty array to allow sync to continue
 	}
 }
 

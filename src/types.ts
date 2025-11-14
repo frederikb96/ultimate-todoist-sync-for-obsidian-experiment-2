@@ -104,6 +104,12 @@ export interface SyncResponse {
 	sync_status?: { [uuid: string]: string };
 }
 
+// Todoist Completed Tasks REST API response
+export interface CompletedTasksResponse {
+	items: TodoistTask[];
+	next_cursor: string | null;  // null when no more pages
+}
+
 // Todoist task from API
 export interface TodoistTask {
 	id: string;
