@@ -150,6 +150,9 @@ export async function pullFromTodoist(
 		// Update sync token for next sync
 		settings.syncToken = response.sync_token;
 
+		// Track orphaned tasks (in Todoist with tdsync but not in our DB)
+		const orphanedTasks: string[] = [];
+
 		// Process each modified task from API
 		for (const apiTask of response.items) {
 			// Filter by TID (NOT label!) - k-note lines 2447-2471
@@ -200,8 +203,17 @@ export async function pullFromTodoist(
 						`Task ${apiTask.id} has tdsync label but not in DB - orphaned task?`,
 						{ content: apiTask.content }
 					);
+					orphanedTasks.push(apiTask.content);
 				}
 			}
+		}
+
+		// Show banner notification if orphaned tasks found
+		if (orphanedTasks.length > 0) {
+			new Notice(
+				`Found ${orphanedTasks.length} task(s) in Todoist with tdsync label but not in database. Check console for details.`,
+				8000  // Show for 8 seconds
+			);
 		}
 
 	} catch (error) {

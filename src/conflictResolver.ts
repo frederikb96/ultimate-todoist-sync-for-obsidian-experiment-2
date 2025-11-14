@@ -19,6 +19,14 @@ export function resolveConflicts(
 		return null;  // No conflicts
 	}
 
+	// DELETION ALWAYS WINS - check this first!
+	// If any change is a deletion, that takes precedence
+	const deletionChange = task.pending_changes.find(c => c.changes.deleted === true);
+	if (deletionChange) {
+		console.log(`Deletion detected for task ${task.tid}, deletion wins (source: ${deletionChange.source})`);
+		return { source: deletionChange.source, changes: deletionChange.changes };
+	}
+
 	// If only one source, use that change
 	if (task.pending_changes.length === 1) {
 		const change = task.pending_changes[0];

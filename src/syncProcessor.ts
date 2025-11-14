@@ -455,6 +455,8 @@ async function resolveAndApplyUpdates(
 	}> = [];
 
 	const fileUpdates: Array<{ tid: string; newContent: string }> = [];
+	const apiDeletions: string[] = [];  // Task IDs to delete from Todoist
+	const fileDeletions: string[] = [];  // Task IDs to delete from Obsidian
 
 	for (const [tid, task] of tasksToUpdate) {
 		// Resolve conflicts (returns winning change)
@@ -467,6 +469,23 @@ async function resolveAndApplyUpdates(
 		}
 
 		console.log(`Resolved conflict for task ${tid}: ${resolution.source} wins`);
+
+		// HANDLE DELETIONS FIRST (delete always wins!)
+		if (resolution.changes.deleted) {
+			console.log(`Task ${tid} marked for deletion (source: ${resolution.source})`);
+
+			if (resolution.source === 'local') {
+				// Local deletion → delete from Todoist API
+				apiDeletions.push(tid);
+			} else {
+				// API deletion → delete from Obsidian file
+				fileDeletions.push(tid);
+			}
+
+			// Remove from DB immediately
+			db.deleteTask(tid);
+			continue;  // Skip normal update logic
+		}
 
 		if (resolution.source === 'local') {
 			// Local wins - push to API
@@ -534,6 +553,24 @@ async function resolveAndApplyUpdates(
 			console.error('Failed to push updates to API:', error);
 			new Notice(`Failed to sync to Todoist: ${error instanceof Error ? error.message : 'Unknown error'}`);
 		}
+	}
+
+	// Apply API deletions (batch)
+	if (apiDeletions.length > 0) {
+		try {
+			console.log(`Deleting ${apiDeletions.length} tasks from Todoist...`);
+			const response = await syncBatchDelete(settings.todoistAPIToken, apiDeletions);
+			settings.syncToken = response.sync_token;
+			console.log('API deletions successful');
+		} catch (error) {
+			console.error('Failed to delete from Todoist:', error);
+			new Notice(`Failed to delete tasks from Todoist: ${error instanceof Error ? error.message : 'Unknown error'}`);
+		}
+	}
+
+	// Apply file deletions (remove lines from Obsidian)
+	if (fileDeletions.length > 0) {
+		await deleteTasksFromFile(file, fileDeletions, editor, vault);
 	}
 
 	// Apply file updates
@@ -734,4 +771,67 @@ export async function searchVaultForTID(
 
 	console.log(`TID ${tid} not found in vault`);
 	return null;
+}
+
+/**
+ * Delete task lines from Obsidian file.
+ * Handles both active (editor) and background (vault) files.
+ *
+ * @param file - File to delete tasks from
+ * @param taskIds - Array of task IDs to delete
+ * @param editor - Editor (if active file), null otherwise
+ * @param vault - Obsidian vault
+ */
+async function deleteTasksFromFile(
+	file: TFile,
+	taskIds: string[],
+	editor: Editor | null,
+	vault: Vault
+): Promise<void> {
+	console.log(`Deleting ${taskIds.length} tasks from file: ${file.path}`);
+
+	// Create Set for O(1) lookup
+	const tidsToDelete = new Set(taskIds);
+
+	if (editor) {
+		// Active file: Use editor.processLines() to delete lines atomically
+		let deletedCount = 0;
+
+		editor.processLines<boolean>(
+			// Phase 1: Check if line contains TID to delete
+			(lineNum, lineText) => {
+				const tid = extractTID(lineText);
+				return tid !== null && tidsToDelete.has(tid);
+			},
+			// Phase 2: Delete matched lines
+			(lineNum, lineText, shouldDelete) => {
+				if (shouldDelete) {
+					deletedCount++;
+					// Return empty text to delete the line
+					return {
+						from: { line: lineNum, ch: 0 },
+						to: { line: lineNum + 1, ch: 0 },  // Include newline
+						text: ''
+					};
+				}
+				return undefined;  // Keep line unchanged
+			}
+		);
+
+		console.log(`Deleted ${deletedCount} lines from active editor`);
+
+	} else {
+		// Background file: Use vault.process() to filter lines
+		await vault.process(file, (content) => {
+			const lines = content.split('\n');
+			const newLines = lines.filter((line) => {
+				const tid = extractTID(line);
+				// Keep line if it doesn't have a TID we want to delete
+				return !(tid && tidsToDelete.has(tid));
+			});
+
+			console.log(`Deleted ${lines.length - newLines.length} lines from background file`);
+			return newLines.join('\n');
+		});
+	}
 }
