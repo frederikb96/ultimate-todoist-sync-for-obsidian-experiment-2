@@ -72,6 +72,7 @@ export async function fetchCompletedTasks(
 	until: string
 ): Promise<TodoistTask[]> {
 	const allTasks: TodoistTask[] = [];
+	const seenTaskIds = new Set<string>();  // Detect duplicates
 	let cursor: string | null = null;
 	let pageCount = 0;
 
@@ -110,14 +111,39 @@ export async function fetchCompletedTasks(
 			// Parse response
 			const data: CompletedTasksResponse = await response.json();
 
-			// Accumulate tasks
-			allTasks.push(...data.items);
-			console.log(`  Received ${data.items.length} tasks (total: ${allTasks.length})`);
+			// Debug logging for cursor value
+			console.log(`  API returned: ${data.items.length} tasks, next_cursor: ${data.next_cursor === null ? 'null' : data.next_cursor === undefined ? 'undefined' : data.next_cursor === '' ? 'empty string' : `"${data.next_cursor}"`}`);
+
+			// Detect duplicate tasks (infinite loop protection)
+			let duplicateCount = 0;
+			for (const task of data.items) {
+				if (seenTaskIds.has(task.id)) {
+					duplicateCount++;
+				} else {
+					seenTaskIds.add(task.id);
+					allTasks.push(task);
+				}
+			}
+
+			if (duplicateCount > 0) {
+				console.warn(`  WARNING: Received ${duplicateCount} duplicate tasks on page ${pageCount}!`);
+			}
+
+			console.log(`  Unique tasks so far: ${allTasks.length}`);
 
 			// Update cursor for next page
 			cursor = data.next_cursor;
 
-		} while (cursor !== null);
+			// Safety limit: prevent infinite loops
+			if (pageCount >= 200) {
+				console.error(`SAFETY LIMIT: Stopped after 200 pages (${allTasks.length} tasks). This should not happen!`);
+				new Notice('Warning: Stopped fetching completed tasks after 200 pages. Please report this issue.');
+				break;
+			}
+
+			// Exit if no more pages (check for falsy, not just null!)
+			// API might return undefined, empty string, or null
+		} while (cursor);
 
 		console.log(`Completed task fetch finished: ${allTasks.length} tasks from ${pageCount} pages`);
 		return allTasks;
