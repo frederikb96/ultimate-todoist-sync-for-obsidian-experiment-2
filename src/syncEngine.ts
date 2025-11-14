@@ -4,7 +4,7 @@
 import { TFile, Vault, MetadataCache, Plugin, Notice } from 'obsidian';
 import { Database } from './database';
 import { SyncSettings } from './types';
-import { nextFrame, sleep } from './utils';
+import { nextFrame, sleep, convertDurationToMinutes } from './utils';
 import { syncPull } from './todoistAPI';
 import { processFile } from './syncProcessor';
 
@@ -181,7 +181,7 @@ export async function pullFromTodoist(
 							dueDate: apiTask.due?.date,
 							dueDatetime: apiTask.due?.datetime,
 							priority: apiTask.priority,
-							duration: apiTask.duration?.amount
+							duration: convertDurationToMinutes(apiTask.duration)  // Convert days to minutes
 						}
 					});
 

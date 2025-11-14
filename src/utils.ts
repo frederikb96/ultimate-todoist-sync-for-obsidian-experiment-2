@@ -37,3 +37,18 @@ export function isTaskCompleted(line: string): boolean {
 	const completedPattern = /^\s*-\s+\[x\]/i;
 	return completedPattern.test(line);
 }
+
+// Convert Todoist duration to minutes
+// API returns {amount: number, unit: "minute" | "day"}
+// We always store in minutes internally
+export function convertDurationToMinutes(duration: { amount: number; unit: string } | undefined | null): number | undefined {
+	if (!duration) return undefined;
+
+	if (duration.unit === "day") {
+		// Convert days to minutes (1 day = 1440 minutes)
+		return duration.amount * 1440;
+	}
+
+	// Already in minutes
+	return duration.amount;
+}
