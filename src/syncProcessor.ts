@@ -130,7 +130,7 @@ async function processNewTasks(
 		return {
 			temp_id: `new-${index}`,  // Preserve order!
 			content: taskData.content,
-			labels: ['tdsync', ...frontmatterLabels, ...taskData.labels],
+			labels: [...new Set(['tdsync', ...frontmatterLabels, ...taskData.labels])],
 			project_id: settings.defaultProjectId,
 			due_date: taskData.dueDate,
 			due_datetime: taskData.dueDatetime,
@@ -211,7 +211,7 @@ async function processNewTasks(
 								dueDatetime: taskData.dueDatetime,
 								priority: taskData.priority,
 								duration: taskData.duration,
-								labels: ['tdsync', ...frontmatterLabels, ...taskData.labels],
+								labels: [...new Set(['tdsync', ...frontmatterLabels, ...taskData.labels])],
 								lastSyncedAt: Date.now(),
 								pending_changes: []
 							});
@@ -285,7 +285,7 @@ async function processNewTasks(
 									dueDatetime: taskData.dueDatetime,
 									priority: taskData.priority,
 									duration: taskData.duration,
-									labels: ['tdsync', ...frontmatterLabels, ...taskData.labels],
+									labels: [...new Set(['tdsync', ...frontmatterLabels, ...taskData.labels])],
 									lastSyncedAt: Date.now(),
 									pending_changes: []
 								});

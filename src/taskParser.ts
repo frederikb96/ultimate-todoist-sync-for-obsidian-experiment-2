@@ -81,10 +81,7 @@ export function parseLabels(line: string): string[] {
 
 	while ((match = labelPattern.exec(line)) !== null) {
 		const label = match[1];
-		// Exclude tdsync tag (purely decorative)
-		if (label.toLowerCase() !== 'tdsync') {
-			labels.push(label);
-		}
+		labels.push(label);
 	}
 
 	return labels;

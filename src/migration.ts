@@ -111,7 +111,7 @@ export async function runMigration(
 					filepath: file.path,
 					content: taskData.content,
 					completed: taskData.completed,
-					labels: taskData.labels,
+					labels: [...new Set(['tdsync', ...taskData.labels])],
 					dueDate: taskData.dueDate,
 					dueTime: taskData.dueTime,
 					dueDatetime: taskData.dueDatetime,
