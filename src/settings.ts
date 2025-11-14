@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from 'obsidian';
+import { App, PluginSettingTab, Setting, Modal } from 'obsidian';
 import TodoistSyncPlugin from './main';
 
 export class TodoistSettingTab extends PluginSettingTab {
@@ -14,6 +14,32 @@ export class TodoistSettingTab extends PluginSettingTab {
 		containerEl.empty();
 
 		containerEl.createEl('h2', { text: 'Todoist Sync Settings' });
+
+		// Migration section (first-time setup)
+		containerEl.createEl('h3', { text: 'Migration' });
+
+		const migrationDesc = containerEl.createEl('p', { cls: 'setting-item-description' });
+		migrationDesc.setText('Import existing tasks with Todoist IDs from your notes into the database. Required for first-time setup if you already have synced tasks.');
+
+		new Setting(containerEl)
+			.setName('Import Existing Tasks')
+			.setDesc('Scan all files with frontmatter and import tasks that have Todoist IDs')
+			.addButton(button => button
+				.setButtonText('Import Tasks')
+				.setDisabled(!this.plugin.settings.apiInitialized)
+				.onClick(async () => {
+					// Show confirmation modal
+					new MigrationConfirmModal(this.app, this.plugin, async () => {
+						await this.plugin.runMigration();
+					}).open();
+				}));
+
+		if (!this.plugin.settings.apiInitialized) {
+			containerEl.createEl('p', {
+				text: 'Note: Configure API token and test connection before running migration.',
+				cls: 'setting-item-description mod-warning'
+			});
+		}
 
 		// API Token section
 		containerEl.createEl('h3', { text: 'Authentication' });
@@ -120,5 +146,57 @@ export class TodoistSettingTab extends PluginSettingTab {
 				.setDesc(this.plugin.settings.userData.tz_info.timezone)
 				.setDisabled(true);
 		}
+	}
+}
+
+/**
+ * Confirmation modal for migration operation.
+ * Shows detailed explanation and requires explicit confirmation.
+ */
+class MigrationConfirmModal extends Modal {
+	plugin: TodoistSyncPlugin;
+	onConfirm: () => void;
+
+	constructor(app: App, plugin: TodoistSyncPlugin, onConfirm: () => void) {
+		super(app);
+		this.plugin = plugin;
+		this.onConfirm = onConfirm;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+
+		contentEl.createEl('h2', { text: 'Import Existing Tasks?' });
+
+		contentEl.createEl('p', {
+			text: 'This will scan all files with "todoist-sync: true" frontmatter and import tasks that have Todoist IDs.'
+		});
+
+		contentEl.createEl('p', { text: 'Requirements:' });
+		const ul = contentEl.createEl('ul');
+		ul.createEl('li', { text: 'Database must be empty' });
+		ul.createEl('li', { text: 'Tasks must have existing Todoist IDs (%%[tid:: ...]%%)' });
+
+		contentEl.createEl('p', {
+			text: 'After migration, trigger a sync. On first sync, Todoist will overwrite local changes if conflicts exist.'
+		});
+
+		const buttonContainer = contentEl.createDiv({ cls: 'modal-button-container' });
+
+		buttonContainer.createEl('button', { text: 'Cancel' })
+			.addEventListener('click', () => this.close());
+
+		buttonContainer.createEl('button', {
+			text: 'Import',
+			cls: 'mod-cta'
+		}).addEventListener('click', () => {
+			this.close();
+			this.onConfirm();
+		});
+	}
+
+	onClose() {
+		const { contentEl } = this;
+		contentEl.empty();
 	}
 }

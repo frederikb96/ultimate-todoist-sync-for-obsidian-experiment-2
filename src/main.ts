@@ -4,6 +4,7 @@ import { DEFAULT_SETTINGS, Database } from './database';
 import { TodoistSettingTab } from './settings';
 import { runSync } from './syncEngine';
 import { testConnection } from './todoistAPI';
+import { runMigration } from './migration';
 
 export default class TodoistSyncPlugin extends Plugin {
 	settings: SyncSettings;
@@ -187,6 +188,60 @@ export default class TodoistSyncPlugin extends Plugin {
 			// Mark as not initialized
 			this.settings.apiInitialized = false;
 			await this.saveSettings();
+		}
+	}
+
+	/**
+	 * Run migration to import existing tasks from Obsidian files.
+	 * Called by "Import Tasks" button in settings.
+	 */
+	async runMigration(): Promise<void> {
+		// Guard: check if sync in progress
+		if (this.isSyncInProgress) {
+			new Notice('Cannot run migration while sync is in progress. Please wait.');
+			return;
+		}
+
+		// Guard: check API configured
+		if (!this.settings.apiInitialized || !this.settings.todoistAPIToken) {
+			new Notice('Please configure Todoist API token in settings first');
+			return;
+		}
+
+		new Notice('Starting migration...');
+		this.isSyncInProgress = true; // Prevent sync during migration
+
+		try {
+			// Call migration function
+			const result = await runMigration(
+				this.app.vault,
+				this.app.metadataCache,
+				this.app.workspace,
+				this.db,
+				this.settings
+			);
+
+			if (result.success) {
+				// Save settings (persists syncToken="*" change)
+				await this.saveSettings();
+
+				// Show success message with next steps
+				new Notice(
+					`Migration complete! ${result.taskCount} tasks imported.\n\nNext: Trigger a sync to pull latest changes from Todoist.`,
+					10000 // Show for 10 seconds
+				);
+				console.log(`Migration successful: ${result.taskCount} tasks imported`);
+			} else {
+				// Show error message
+				new Notice(result.error || 'Migration failed', 15000);
+				console.error('Migration failed:', result.error);
+			}
+
+		} catch (error) {
+			console.error('Migration failed with exception:', error);
+			new Notice(`Migration error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+		} finally {
+			this.isSyncInProgress = false; // Always reset flag
 		}
 	}
 
