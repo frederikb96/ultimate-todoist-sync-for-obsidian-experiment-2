@@ -608,10 +608,12 @@ async function reconcileFileTasks(
 		const contentChanged = currentTaskData.content !== dbTask.content;
 		const completedChanged = currentTaskData.completed !== dbTask.completed;
 		const dueDateChanged = currentTaskData.dueDate !== dbTask.dueDate;
+		const dueDatetimeChanged = currentTaskData.dueDatetime !== dbTask.dueDatetime;
 		const priorityChanged = currentTaskData.priority !== dbTask.priority;
 		const durationChanged = currentTaskData.duration !== dbTask.duration;
+		const labelsChanged = JSON.stringify(currentTaskData.labels) !== JSON.stringify(dbTask.labels);
 
-		if (contentChanged || completedChanged || dueDateChanged || priorityChanged || durationChanged) {
+		if (contentChanged || completedChanged || dueDateChanged || dueDatetimeChanged || priorityChanged || durationChanged || labelsChanged) {
 			// Local changes detected - add to pending_changes
 			console.log(`Local changes detected for task ${task.tid}`);
 			dbTask.pending_changes.push({

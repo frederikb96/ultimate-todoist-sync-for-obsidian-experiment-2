@@ -220,8 +220,8 @@ export async function syncBatchUpdate(
 				args.due = { datetime: update.due_datetime };
 			} else if (update.due_date) {
 				args.due = { date: update.due_date };
-			} else if (update.due_date !== undefined || update.due_datetime !== undefined) {
-				// Either field present but falsy → user removed date → clear it
+			} else if ('due_date' in update || 'due_datetime' in update) {
+				// Properties exist in update object but both falsy → user removed date → clear it
 				args.due = null;
 			}
 
@@ -234,14 +234,14 @@ export async function syncBatchUpdate(
 
 			// Duration handling
 			// Set to null to clear duration (API requirement: explicit null)
-			if (update.duration !== undefined) {
+			if ('duration' in update) {
 				if (update.duration) {
 					args.duration = {
 						amount: update.duration,
 						unit: 'minute'
 					};
 				} else {
-					// Duration present but falsy (undefined/null) → user removed it → clear
+					// Property exists but falsy → user removed duration → clear it
 					args.duration = null;
 				}
 			}
@@ -253,6 +253,19 @@ export async function syncBatchUpdate(
 			});
 		}
 	}
+
+	// Debug logging for field clearing
+	console.log('syncBatchUpdate: Processing', updates.length, 'updates');
+	for (const update of updates) {
+		console.log('  Update for', update.id, ':', {
+			content: update.content,
+			due_date: update.due_date,
+			due_datetime: update.due_datetime,
+			priority: update.priority,
+			duration: update.duration
+		});
+	}
+	console.log('syncBatchUpdate sending commands:', JSON.stringify(commands, null, 2));
 
 	const response = await todoistSyncRequest(apiToken, {
 		commands: JSON.stringify(commands),
