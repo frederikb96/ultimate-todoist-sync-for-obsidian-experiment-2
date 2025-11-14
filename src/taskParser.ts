@@ -57,8 +57,8 @@ export function parseTaskContent(line: string): string {
 	// Remove due time: ⏰HH:MM
 	content = content.replace(/\s*⏰\s*\d{1,2}:\d{2}\s*$/, '');
 
-	// Remove due date: 🗓️YYYY-MM-DD or 📅YYYY-MM-DD
-	content = content.replace(/\s*(?:🗓️|📅)\s*\d{4}-\d{2}-\d{2}\s*$/, '');
+	// Remove due date/datetime: 🗓️YYYY-MM-DD or 🗓️YYYY-MM-DDTHH:MM:SS or 📅...
+	content = content.replace(/\s*(?:🗓️|📅)\s*\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2})?\s*$/, '');
 
 	// Remove priority: !!1-4 or emoji (⏫ ⏬ 🔼 🔽)
 	content = content.replace(/\s*!![1-4]\s*$/, '');
@@ -212,8 +212,9 @@ export function buildTaskLine(
 		parts.push(allLabels.map(l => `#${l}`).join(' '));
 	}
 
-	// 4. Priority (if exists)
-	if (data.priority) {
+	// 4. Priority (if exists and NOT default)
+	// Priority 1 is Todoist's default, so don't display it (like "no date" isn't shown)
+	if (data.priority && data.priority !== 1) {
 		parts.push(`!!${data.priority}`);
 	}
 
