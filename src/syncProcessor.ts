@@ -79,6 +79,10 @@ export async function processFile(
 
 	console.log(`New tasks: ${newTasks.length}, Existing tasks: ${existingTasks.length}`);
 
+	// Bidirectional check: DB → File (detect moved/deleted tasks)
+	// Do this FIRST, before any API calls, using already-extracted task list
+	await bidirectionalCheck(file, existingTasks, vault, metadataCache, db);
+
 	// Process new tasks (create on Todoist API, write TIDs back)
 	if (newTasks.length > 0) {
 		await processNewTasks(file, newTasks, vault, editor, db, settings, frontmatterLabels);
@@ -88,9 +92,6 @@ export async function processFile(
 	if (existingTasks.length > 0) {
 		await processExistingTasks(file, existingTasks, vault, editor, db, settings);
 	}
-
-	// Bidirectional check: DB → File (detect moved/deleted tasks)
-	await bidirectionalCheck(file, vault, metadataCache, editor, db);
 
 	console.log(`Finished processing file: ${file.path}`);
 }
@@ -645,21 +646,21 @@ async function resolveAndApplyUpdates(
  * Detects tasks that moved out of file or were deleted.
  * k-note lines 2677-2683
  *
- * CRITICAL: Must use editor.getValue() for active files to see unflushed changes!
- * If we use vault.cachedRead(), we'd miss TIDs we just added via editor.processLines(),
- * think tasks disappeared, and DELETE them from Todoist!
+ * OPTIMIZATION: Now runs BEFORE processNewTasks(), using already-extracted task list.
+ * No need to re-read file - we already have all TIDs from the initial parse.
+ * This is faster, simpler, and catches deletions earlier (before any API calls).
  *
  * @param file - Current file
+ * @param existingTasks - Tasks with TIDs found in file (from initial parse)
  * @param vault - Obsidian vault
  * @param metadataCache - Metadata cache
- * @param editor - Editor (if active file), null otherwise
  * @param db - Database instance
  */
 async function bidirectionalCheck(
 	file: TFile,
+	existingTasks: Array<{ lineNum: number; line: string; tid: string | null }>,
 	vault: Vault,
 	metadataCache: MetadataCache,
-	editor: Editor | null,
 	db: Database
 ): Promise<void> {
 	console.log(`Bidirectional check for file: ${file.path}`);
@@ -671,17 +672,12 @@ async function bidirectionalCheck(
 		return;  // No tasks in DB for this file
 	}
 
-	// Read file - MUST use editor if available to see unflushed changes!
-	// Critical: editor.processLines() changes aren't saved to disk yet
-	const content = editor ? editor.getValue() : await vault.cachedRead(file);
-	const lines = content.split('\n');
-
-	// Collect TIDs present in file
+	// Collect TIDs present in file (from already-parsed existingTasks)
+	// No need to re-read file - we have the data from line 77-78!
 	const tidsInFile = new Set<string>();
-	for (const line of lines) {
-		const tid = extractTID(line);
-		if (tid) {
-			tidsInFile.add(tid);
+	for (const task of existingTasks) {
+		if (task.tid) {
+			tidsInFile.add(task.tid);
 		}
 	}
 
