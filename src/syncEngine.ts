@@ -53,11 +53,19 @@ export async function runSync(
 		// Step 2: Pull from Todoist API (incremental sync)
 		await pullFromTodoist(db, settings);
 
+		// Step 2.5: Get files with pending changes (need to process for write-back)
+		const filesWithPendingChanges = getFilesWithPendingChanges(db, vault);
+		console.log(`Found ${filesWithPendingChanges.length} files with pending changes`);
+
+		// Merge modified files and pending changes files (deduplicate)
+		const allFilesToProcess = Array.from(new Set([...modifiedFiles, ...filesWithPendingChanges]));
+		console.log(`Total files to process: ${allFilesToProcess.length} (${modifiedFiles.length} local + ${filesWithPendingChanges.length} pending)`);
+
 		// Step 3: Process files sequentially with yielding
 		// CRITICAL: Sequential processing required for move detection!
-		if (modifiedFiles.length > 0) {
+		if (allFilesToProcess.length > 0) {
 			await processFilesSequentially(
-				modifiedFiles,
+				allFilesToProcess,
 				vault,
 				metadataCache,
 				workspace,
@@ -73,13 +81,51 @@ export async function runSync(
 		await saveDatabase(plugin, settings);
 
 		console.log('Sync completed successfully');
-		new Notice(`Sync completed: ${modifiedFiles.length} files processed`);
+		new Notice(`Sync completed: ${allFilesToProcess.length} files processed (${modifiedFiles.length} local, ${filesWithPendingChanges.length} pending)`);
 
 	} catch (error) {
 		console.error('Sync failed:', error);
 		new Notice(`Sync error: ${error instanceof Error ? error.message : 'Unknown error'}`);
 		throw error;
 	}
+}
+
+/**
+ * Get files that have tasks with pending changes.
+ * These files need to be processed to resolve conflicts and write back changes.
+ * Includes API changes, local changes, and leftover changes from crashes.
+ *
+ * @param db - Database instance
+ * @param vault - Obsidian vault (for resolving file paths)
+ * @returns Array of files that have tasks with pending changes
+ */
+export function getFilesWithPendingChanges(
+	db: Database,
+	vault: Vault
+): TFile[] {
+	// Get all tasks from DB
+	const allTasks = Object.entries(db.settings.tasks);
+
+	// Filter to tasks with any pending changes
+	const tasksWithPendingChanges = allTasks.filter(([_, task]) =>
+		task.pending_changes.length > 0
+	);
+
+	// Extract unique file paths
+	const uniqueFilePaths = new Set(
+		tasksWithPendingChanges.map(([_, task]) => task.filepath)
+	);
+
+	// Resolve file paths to TFile objects (filter out nulls/folders)
+	const files: TFile[] = [];
+	for (const filepath of uniqueFilePaths) {
+		const file = vault.getAbstractFileByPath(filepath);
+		if (file instanceof TFile) {
+			files.push(file);
+		}
+	}
+
+	return files;
 }
 
 /**
