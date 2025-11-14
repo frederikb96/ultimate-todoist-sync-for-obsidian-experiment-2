@@ -135,9 +135,9 @@ export interface ApiCommand {
 		checked?: boolean;  // NOTE: NOT used in item_update! Completion requires item_complete/item_uncomplete commands
 		labels?: string[];
 		project_id?: string;
-		due?: { date?: string; datetime?: string };
+		due?: { date?: string; datetime?: string } | null;  // null to clear due date
 		priority?: number;
-		duration?: { amount: number; unit: string };
+		duration?: { amount: number; unit: string } | null;  // null to clear duration
 		date_completed?: string;  // For item_complete command (optional)
 	};
 }

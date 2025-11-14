@@ -215,21 +215,35 @@ export async function syncBatchUpdate(
 			}
 
 			// Due date handling
+			// Set to null to clear date (API requirement: explicit null, not omitted)
 			if (update.due_datetime) {
 				args.due = { datetime: update.due_datetime };
 			} else if (update.due_date) {
 				args.due = { date: update.due_date };
+			} else if (update.due_date !== undefined || update.due_datetime !== undefined) {
+				// Either field present but falsy → user removed date → clear it
+				args.due = null;
 			}
 
-			if (update.priority !== undefined) {
-				args.priority = update.priority;
+			// Priority handling
+			// Set to 1 (natural/no priority) to clear priority
+			// Priority field is always sent if present in update (even if undefined)
+			if ('priority' in update) {
+				args.priority = update.priority || 1;  // Use 1 if undefined (no priority)
 			}
 
+			// Duration handling
+			// Set to null to clear duration (API requirement: explicit null)
 			if (update.duration !== undefined) {
-				args.duration = {
-					amount: update.duration,
-					unit: 'minute'
-				};
+				if (update.duration) {
+					args.duration = {
+						amount: update.duration,
+						unit: 'minute'
+					};
+				} else {
+					// Duration present but falsy (undefined/null) → user removed it → clear
+					args.duration = null;
+				}
 			}
 
 			commands.push({
