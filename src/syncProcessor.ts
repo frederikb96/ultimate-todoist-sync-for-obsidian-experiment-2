@@ -490,26 +490,38 @@ async function resolveAndApplyUpdates(
 			// Create TID → content mapping
 			const updateMapping = new Map<string, string>();
 			for (const update of fileUpdates) {
+				console.log(`  Preparing update for ${update.tid}:`, update.newContent.substring(0, 80));
 				updateMapping.set(update.tid, update.newContent);
 			}
 
 			editor.processLines<string | null>(
-				// Phase 1: Identify lines that need updates
+				// Phase 1: Return TID identifier for lines that need updates
 				(lineNum, lineText) => {
 					const tid = extractTID(lineText);
 					if (tid && updateMapping.has(tid)) {
-						return updateMapping.get(tid)!;
+						console.log(`  Phase 1 - Line ${lineNum}: Found TID ${tid} to update`);
+						return tid;  // Return TID identifier, not content!
 					}
 					return null;
 				},
-				// Phase 2: Generate changes for matched lines
-				(lineNum, lineText, newContent) => {
-					if (newContent && newContent !== lineText) {
-						return {
-							from: { line: lineNum, ch: 0 },
-							to: { line: lineNum, ch: lineText.length },
-							text: newContent
-						};
+				// Phase 2: Receive TID and generate changes
+				(lineNum, lineText, tid) => {
+					if (tid) {
+						const newContent = updateMapping.get(tid)!;
+						console.log(`  Phase 2 - Line ${lineNum}: Comparing old vs new`, {
+							old: lineText.substring(0, 60),
+							new: newContent.substring(0, 60)
+						});
+						if (newContent !== lineText) {
+							console.log(`  Phase 2 - Line ${lineNum}: Generating change (content differs)`);
+							return {
+								from: { line: lineNum, ch: 0 },
+								to: { line: lineNum, ch: lineText.length },
+								text: newContent
+							};
+						} else {
+							console.log(`  Phase 2 - Line ${lineNum}: No change needed (content identical)`);
+						}
 					}
 					return undefined;
 				}
