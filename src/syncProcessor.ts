@@ -480,11 +480,11 @@ async function resolveAndApplyUpdates(
 	}
 
 	// Apply file updates
-	// Use editor.processLines() for active files (preserves cursor)
+	// Use editor.transaction() for active files (atomic, preserves cursor)
 	// Use vault.process() for background files (atomic)
 	if (fileUpdates.length > 0) {
 		if (editor) {
-			// Active file: Use editor.processLines() for all updates atomically
+			// Active file: Use editor.transaction() for atomic batch updates
 			console.log(`Applying ${fileUpdates.length} file updates using Editor API (active file)`);
 
 			// Create TID → content mapping
@@ -494,38 +494,42 @@ async function resolveAndApplyUpdates(
 				updateMapping.set(update.tid, update.newContent);
 			}
 
-			editor.processLines<string | null>(
-				// Phase 1: Return TID identifier for lines that need updates
-				(lineNum, lineText) => {
-					const tid = extractTID(lineText);
-					if (tid && updateMapping.has(tid)) {
-						console.log(`  Phase 1 - Line ${lineNum}: Found TID ${tid} to update`);
-						return tid;  // Return TID identifier, not content!
-					}
-					return null;
-				},
-				// Phase 2: Receive TID and generate changes
-				(lineNum, lineText, tid) => {
-					if (tid) {
-						const newContent = updateMapping.get(tid)!;
-						console.log(`  Phase 2 - Line ${lineNum}: Comparing old vs new`, {
-							old: lineText.substring(0, 60),
-							new: newContent.substring(0, 60)
+			// Build all changes by iterating through file
+			const changes: EditorChange[] = [];
+			const totalLines = editor.lineCount();
+			console.log(`Scanning ${totalLines} lines for TIDs to update...`);
+
+			for (let lineNum = 0; lineNum < totalLines; lineNum++) {
+				const line = editor.getLine(lineNum);
+				const tid = extractTID(line);
+
+				if (tid && updateMapping.has(tid)) {
+					const newContent = updateMapping.get(tid)!;
+					console.log(`  Line ${lineNum}: Found TID ${tid}`);
+					console.log(`    Old: ${line.substring(0, 60)}`);
+					console.log(`    New: ${newContent.substring(0, 60)}`);
+
+					if (newContent !== line) {
+						changes.push({
+							from: { line: lineNum, ch: 0 },
+							to: { line: lineNum, ch: line.length },
+							text: newContent
 						});
-						if (newContent !== lineText) {
-							console.log(`  Phase 2 - Line ${lineNum}: Generating change (content differs)`);
-							return {
-								from: { line: lineNum, ch: 0 },
-								to: { line: lineNum, ch: lineText.length },
-								text: newContent
-							};
-						} else {
-							console.log(`  Phase 2 - Line ${lineNum}: No change needed (content identical)`);
-						}
+						console.log(`    → Change queued (content differs)`);
+					} else {
+						console.log(`    → No change needed (identical)`);
 					}
-					return undefined;
 				}
-			);
+			}
+
+			// Apply all changes atomically
+			if (changes.length > 0) {
+				console.log(`Applying ${changes.length} changes atomically via editor.transaction()`);
+				editor.transaction({ changes });
+				console.log(`✓ Changes applied successfully`);
+			} else {
+				console.log(`No changes to apply`);
+			}
 
 		} else {
 			// Background file: Use vault.process() (existing logic, one by one)
