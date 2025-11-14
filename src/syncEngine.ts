@@ -160,7 +160,7 @@ export async function pullFromTodoist(
 					timestamp: Date.now(),
 					changes: {
 						content: apiTask.content,
-						completed: apiTask.is_completed,
+						completed: apiTask.checked,  // API field is "checked" not "is_completed"
 						labels: apiTask.labels,
 						dueDate: apiTask.due?.date,
 						dueDatetime: apiTask.due?.datetime,

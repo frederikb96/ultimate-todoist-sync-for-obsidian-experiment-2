@@ -1,12 +1,12 @@
-// Todoist Sync API v9 Client
+// Todoist Sync API Client (API v1)
 // Implements incremental sync with batch operations
 
 import { v4 as uuidv4 } from 'uuid';
 import { Notice } from 'obsidian';
 import type { SyncResponse, TodoistTask, ApiCommand } from './types';
 
-// Todoist Sync API v9 endpoint
-const SYNC_API_URL = 'https://api.todoist.com/sync/v9/sync';
+// Todoist Sync API endpoint
+const SYNC_API_URL = 'https://api.todoist.com/api/v1/sync';
 
 /**
  * Pull modified tasks from Todoist (incremental sync).
@@ -147,7 +147,7 @@ export async function syncBatchUpdate(
 	updates: Array<{
 		id: string;
 		content?: string;
-		is_completed?: boolean;
+		checked?: boolean;  // API field is "checked" not "is_completed"
 		labels?: string[];
 		due_date?: string;
 		due_datetime?: string;
@@ -173,8 +173,8 @@ export async function syncBatchUpdate(
 			args.content = update.content;
 		}
 
-		if (update.is_completed !== undefined) {
-			args.is_completed = update.is_completed;
+		if (update.checked !== undefined) {
+			args.checked = update.checked;
 		}
 
 		if (update.labels !== undefined) {

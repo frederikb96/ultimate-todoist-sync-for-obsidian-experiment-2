@@ -98,7 +98,7 @@ export interface SyncResponse {
 export interface TodoistTask {
 	id: string;
 	content: string;
-	is_completed: boolean;
+	checked: boolean;  // Completion status (API field name is "checked" not "is_completed")
 	due?: {
 		date: string;
 		datetime?: string;
@@ -120,7 +120,7 @@ export interface ApiCommand {
 	args: {
 		id?: string;
 		content?: string;
-		is_completed?: boolean;
+		checked?: boolean;  // API field name is "checked" not "is_completed"
 		labels?: string[];
 		project_id?: string;
 		due?: { date?: string; datetime?: string };

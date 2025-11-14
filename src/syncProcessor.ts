@@ -329,7 +329,7 @@ async function resolveAndApplyUpdates(
 	const apiUpdates: Array<{
 		id: string;
 		content?: string;
-		is_completed?: boolean;
+		checked?: boolean;  // API field is "checked" not "is_completed"
 		labels?: string[];
 		due_date?: string;
 		due_datetime?: string;
@@ -356,7 +356,7 @@ async function resolveAndApplyUpdates(
 			apiUpdates.push({
 				id: tid,
 				content: resolution.changes.content,
-				is_completed: resolution.changes.completed,
+				checked: resolution.changes.completed,  // API field is "checked"
 				labels: resolution.changes.labels,
 				due_date: resolution.changes.dueDate,
 				due_datetime: resolution.changes.dueDatetime,
