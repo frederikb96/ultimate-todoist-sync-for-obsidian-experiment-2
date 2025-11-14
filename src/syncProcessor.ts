@@ -168,78 +168,92 @@ async function processNewTasks(
 		// This is an acceptable edge case - duplicate content is rare and
 		// deduplication may even be desired behavior.
 		if (editor) {
-			// Active file: Use editor.processLines()
+			// Active file: Use editor.transaction() for atomic TID insertion
 			console.log('Writing TIDs using Editor API (active file)');
 
-			//  Create TID mapping for processLines
-			const tidMapping = new Map<string, string>();
-			for (let i = 0; i < newTasks.length; i++) {
-				const tempId = `new-${i}`;
-				const realTID = response.temp_id_mapping[tempId];
-				if (realTID) {
-					tidMapping.set(newTasks[i].line, realTID);
+			// Build changes array by iterating through file
+			const changes: EditorChange[] = [];
+			const writtenTIDs = new Set<string>();
+			const totalLines = editor.lineCount();
+
+			console.log(`Scanning ${totalLines} lines to write ${newTasks.length} TIDs...`);
+
+			// Match tasks by content (without TID) since line might have changed
+			for (let lineNum = 0; lineNum < totalLines; lineNum++) {
+				const line = editor.getLine(lineNum);
+
+				// Skip lines that already have TIDs
+				if (extractTID(line)) continue;
+
+				// Parse this line
+				const currentTask = parseTaskLine(line);
+				if (!currentTask) continue;
+
+				// Try to match with newTasks by content
+				for (let i = 0; i < newTasks.length; i++) {
+					const tempId = `new-${i}`;
+					const realTID = response.temp_id_mapping[tempId];
+
+					if (!realTID || writtenTIDs.has(realTID)) continue;
+
+					const originalTask = parseTaskLine(newTasks[i].line);
+					if (!originalTask) continue;
+
+					// Match by content (user might have edited formatting)
+					if (currentTask.content === originalTask.content) {
+						console.log(`  Line ${lineNum}: Matched content "${currentTask.content.substring(0, 40)}" → TID ${realTID}`);
+
+						// Build new line with TID
+						currentTask.tid = realTID;
+						const newLine = buildTaskLine(currentTask, frontmatterLabels);
+
+						// Add to DB
+						db.setTask(realTID, {
+							tid: realTID,
+							filepath: file.path,
+							content: currentTask.content,
+							completed: currentTask.completed,
+							dueDate: currentTask.dueDate,
+							dueTime: currentTask.dueTime,
+							dueDatetime: currentTask.dueDatetime,
+							priority: currentTask.priority,
+							duration: currentTask.duration,
+							labels: [...new Set(['tdsync', ...frontmatterLabels, ...currentTask.labels])],
+							lastSyncedAt: Date.now(),
+							pending_changes: []
+						});
+
+						writtenTIDs.add(realTID);
+
+						// Queue change if line content differs
+						if (newLine !== line) {
+							changes.push({
+								from: { line: lineNum, ch: 0 },
+								to: { line: lineNum, ch: line.length },
+								text: newLine
+							});
+						}
+
+						break; // Found match, move to next line
+					}
 				}
 			}
 
-			// Track which tasks were successfully written
-			const writtenTIDs = new Set<string>();
+			// Apply all TID changes atomically
+			if (changes.length > 0) {
+				console.log(`Applying ${changes.length} TID insertions atomically via editor.transaction()`);
+				editor.transaction({ changes });
+				console.log(`✓ TIDs written successfully`);
+			}
 
-			editor.processLines<string | null>(
-				// Phase 1: Identify lines that need TIDs
-				(lineNum, lineText) => {
-					const tid = tidMapping.get(lineText);
-					if (tid && !writtenTIDs.has(tid)) {
-						return tid;  // Return TID for this line
-					}
-					return null;
-				},
-				// Phase 2: Generate changes for matched lines
-				(lineNum, lineText, tid) => {
-					if (tid) {
-						const taskData = parseTaskLine(lineText);
-						if (taskData) {
-							taskData.tid = tid;
-							const newLine = buildTaskLine(taskData, frontmatterLabels);
-
-							// Add to DB
-							db.setTask(tid, {
-								tid,
-								filepath: file.path,
-								content: taskData.content,
-								completed: taskData.completed,
-								dueDate: taskData.dueDate,
-								dueTime: taskData.dueTime,
-								dueDatetime: taskData.dueDatetime,
-								priority: taskData.priority,
-								duration: taskData.duration,
-								labels: [...new Set(['tdsync', ...frontmatterLabels, ...taskData.labels])],
-								lastSyncedAt: Date.now(),
-								pending_changes: []
-							});
-
-							writtenTIDs.add(tid);
-
-							// Return EditorChange if line changed
-							if (newLine !== lineText) {
-								return {
-									from: { line: lineNum, ch: 0 },
-									to: { line: lineNum, ch: lineText.length },
-									text: newLine
-								};
-							}
-						}
-					}
-					// No change needed
-					return undefined;
-				}
-			);
-
-			// Fallback: Check if any TIDs weren't written (ghost tasks)
-			for (const [taskLine, tid] of tidMapping) {
-				if (!writtenTIDs.has(tid)) {
-					console.error(`Task not found during editor.processLines(): ${taskLine.substring(0, 50)}...`);
+			// Check for unmatched tasks
+			for (let i = 0; i < newTasks.length; i++) {
+				const tempId = `new-${i}`;
+				const realTID = response.temp_id_mapping[tempId];
+				if (realTID && !writtenTIDs.has(realTID)) {
+					console.error(`Task not found in file: ${newTasks[i].line.substring(0, 50)}...`);
 					new Notice(`Task disappeared during sync - deleting from Todoist`);
-					syncBatchDelete(settings.todoistAPIToken, [tid])
+					syncBatchDelete(settings.todoistAPIToken, [realTID])
 						.catch(err => console.error('Failed to delete ghost task:', err));
 				}
 			}
