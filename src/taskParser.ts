@@ -206,8 +206,10 @@ export function buildTaskLine(
 	// 2. Content
 	parts.push(data.content);
 
-	// 3. User labels (merge inline + frontmatter, deduplicate)
-	const allLabels = mergeLabelLists(data.labels, frontmatterLabels);
+	// 3. User labels (merge inline + frontmatter, deduplicate, filter tdsync)
+	// tdsync is always added separately before TID, so exclude it from label list
+	const allLabels = mergeLabelLists(data.labels, frontmatterLabels)
+		.filter(l => l.toLowerCase() !== 'tdsync');
 	if (allLabels.length > 0) {
 		parts.push(allLabels.map(l => `#${l}`).join(' '));
 	}
