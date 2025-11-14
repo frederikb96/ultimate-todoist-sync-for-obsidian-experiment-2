@@ -1,7 +1,7 @@
 // Sync Engine - Main sync coordinator
 // Orchestrates the sync process: pull from API, process files, save DB
 
-import { TFile, Vault, MetadataCache, Plugin, Notice } from 'obsidian';
+import { TFile, Vault, MetadataCache, Workspace, Plugin, Notice } from 'obsidian';
 import { Database } from './database';
 import { SyncSettings } from './types';
 import { nextFrame, sleep, convertDurationToMinutes } from './utils';
@@ -14,6 +14,7 @@ import { processFile } from './syncProcessor';
  *
  * @param vault - Obsidian vault
  * @param metadataCache - Obsidian metadata cache
+ * @param workspace - Obsidian workspace (for active file detection)
  * @param db - Database instance
  * @param settings - Plugin settings
  * @param skipActiveFile - If true, skip active file (for scheduled sync)
@@ -22,6 +23,7 @@ import { processFile } from './syncProcessor';
 export async function runSync(
 	vault: Vault,
 	metadataCache: MetadataCache,
+	workspace: Workspace,
 	db: Database,
 	settings: SyncSettings,
 	skipActiveFile: boolean,
@@ -58,6 +60,7 @@ export async function runSync(
 				modifiedFiles,
 				vault,
 				metadataCache,
+				workspace,
 				db,
 				settings
 			);
@@ -215,6 +218,7 @@ export async function pullFromTodoist(
  * @param files - Array of files to process
  * @param vault - Obsidian vault
  * @param metadataCache - Metadata cache
+ * @param workspace - Obsidian workspace (for active file detection)
  * @param db - Database instance
  * @param settings - Plugin settings
  */
@@ -222,6 +226,7 @@ export async function processFilesSequentially(
 	files: TFile[],
 	vault: Vault,
 	metadataCache: MetadataCache,
+	workspace: Workspace,
 	db: Database,
 	settings: SyncSettings
 ): Promise<void> {
@@ -235,7 +240,7 @@ export async function processFilesSequentially(
 
 		try {
 			// Process this file completely before moving to next
-			await processFile(file, vault, metadataCache, db, settings);
+			await processFile(file, vault, metadataCache, workspace, db, settings);
 
 		} catch (error) {
 			console.error(`Error processing file ${file.path}:`, error);

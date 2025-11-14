@@ -1,7 +1,7 @@
 // Sync Processor - Process single file with task detection and updates
 // Handles new tasks, existing tasks, bidirectional checking, and conflict resolution
 
-import { TFile, Vault, MetadataCache, Notice } from 'obsidian';
+import { TFile, Vault, MetadataCache, Workspace, MarkdownView, Editor, Notice, EditorChange } from 'obsidian';
 import { v4 as uuidv4 } from 'uuid';
 import { Database } from './database';
 import { SyncSettings, TaskData, TaskInDB } from './types';
@@ -14,9 +14,13 @@ import { resolveConflicts } from './conflictResolver';
  * Process a single file: parse tasks, detect changes, resolve conflicts, update.
  * Main file processor implementing the complete sync flow for one file.
  *
+ * Uses Editor API for active files (preserves cursor, reads unflushed changes).
+ * Uses Vault API for background files (standard atomic operations).
+ *
  * @param file - File to process
  * @param vault - Obsidian vault
  * @param metadataCache - Metadata cache
+ * @param workspace - Obsidian workspace (for active file detection)
  * @param db - Database instance
  * @param settings - Plugin settings
  */
@@ -24,13 +28,30 @@ export async function processFile(
 	file: TFile,
 	vault: Vault,
 	metadataCache: MetadataCache,
+	workspace: Workspace,
 	db: Database,
 	settings: SyncSettings
 ): Promise<void> {
 	console.log(`Processing file: ${file.path}`);
 
-	// Read file content (cached read for performance)
-	const content = await vault.cachedRead(file);
+	// Detect if this is the active file
+	const activeFile = workspace.getActiveFile();
+	const isActive = activeFile?.path === file.path;
+	const activeView = isActive ? workspace.getActiveViewOfType(MarkdownView) : null;
+	const editor = activeView?.editor || null;
+
+	if (isActive && editor) {
+		console.log('Processing ACTIVE file with Editor API');
+	} else if (isActive) {
+		console.log('Active file but no editor available, falling back to Vault API');
+	} else {
+		console.log('Processing background file with Vault API');
+	}
+
+	// Read file content
+	// Use editor.getValue() for active file (includes unflushed changes)
+	// Use vault.cachedRead() for background files
+	const content = editor ? editor.getValue() : await vault.cachedRead(file);
 	const lines = content.split('\n');
 
 	// Get frontmatter labels (apply to ALL tasks in this file)
@@ -60,12 +81,12 @@ export async function processFile(
 
 	// Process new tasks (create on Todoist API, write TIDs back)
 	if (newTasks.length > 0) {
-		await processNewTasks(file, newTasks, vault, db, settings, frontmatterLabels);
+		await processNewTasks(file, newTasks, vault, editor, db, settings, frontmatterLabels);
 	}
 
 	// Process existing tasks (detect changes, resolve conflicts, update)
 	if (existingTasks.length > 0) {
-		await processExistingTasks(file, existingTasks, vault, db, settings);
+		await processExistingTasks(file, existingTasks, vault, editor, db, settings);
 	}
 
 	// Bidirectional check: DB → File (detect moved/deleted tasks)
@@ -82,6 +103,7 @@ export async function processFile(
  * @param file - File containing new tasks
  * @param newTasks - Array of new tasks (no TID)
  * @param vault - Obsidian vault
+ * @param editor - Editor (if active file), null otherwise
  * @param db - Database instance
  * @param settings - Plugin settings
  * @param frontmatterLabels - Labels from file frontmatter
@@ -90,6 +112,7 @@ async function processNewTasks(
 	file: TFile,
 	newTasks: Array<{ lineNum: number; line: string; tid: string | null }>,
 	vault: Vault,
+	editor: Editor | null,
 	db: Database,
 	settings: SyncSettings,
 	frontmatterLabels: string[]
@@ -133,38 +156,46 @@ async function processNewTasks(
 		// Update sync token
 		settings.syncToken = response.sync_token;
 
-		// Step 3: Write TIDs back to file using FULL CONTENT MATCH
-		// k-note lines 2297-2357
-		await vault.process(file, (currentContent) => {
-			const currentLines = currentContent.split('\n');
+		// Step 3: Write TIDs back to file
+		// Use editor.processLines() for active files (preserves cursor)
+		// Use vault.process() for background files (atomic)
+		if (editor) {
+			// Active file: Use editor.processLines()
+			console.log('Writing TIDs using Editor API (active file)');
 
-			// Process in ORDER (handles duplicate content!)
+			//  Create TID mapping for processLines
+			const tidMapping = new Map<string, string>();
 			for (let i = 0; i < newTasks.length; i++) {
-				const task = newTasks[i];
 				const tempId = `new-${i}`;
 				const realTID = response.temp_id_mapping[tempId];
-
-				if (!realTID) {
-					console.error(`No TID mapping for temp_id: ${tempId}`);
-					continue;
+				if (realTID) {
+					tidMapping.set(newTasks[i].line, realTID);
 				}
+			}
 
-				// Find first occurrence of EXACT content (order matters!)
-				let found = false;
-				for (let lineIdx = 0; lineIdx < currentLines.length; lineIdx++) {
-					const currentLine = currentLines[lineIdx];
+			// Track which tasks were successfully written
+			const writtenTIDs = new Set<string>();
 
-					// Match by FULL content AND no TID yet
-					if (currentLine === task.line && extractTID(currentLine) === null) {
-						// Found it! Add TID and enforce ordering
-						const taskData = parseTaskLine(currentLine);
+			editor.processLines<string | null>(
+				// Phase 1: Identify lines that need TIDs
+				(lineNum, lineText) => {
+					const tid = tidMapping.get(lineText);
+					if (tid && !writtenTIDs.has(tid)) {
+						return tid;  // Return TID for this line
+					}
+					return null;
+				},
+				// Phase 2: Generate changes for matched lines
+				(lineNum, lineText, tid) => {
+					if (tid) {
+						const taskData = parseTaskLine(lineText);
 						if (taskData) {
-							taskData.tid = realTID;
-							currentLines[lineIdx] = buildTaskLine(taskData, frontmatterLabels);
+							taskData.tid = tid;
+							const newLine = buildTaskLine(taskData, frontmatterLabels);
 
 							// Add to DB
-							db.setTask(realTID, {
-								tid: realTID,
+							db.setTask(tid, {
+								tid,
 								filepath: file.path,
 								content: taskData.content,
 								completed: taskData.completed,
@@ -178,26 +209,101 @@ async function processNewTasks(
 								pending_changes: []
 							});
 
-							found = true;
-							break;  // Move to next task
+							writtenTIDs.add(tid);
+
+							// Return EditorChange if line changed
+							if (newLine !== lineText) {
+								return {
+									from: { line: lineNum, ch: 0 },
+									to: { line: lineNum, ch: lineText.length },
+									text: newLine
+								};
+							}
 						}
 					}
+					// No change needed
+					return undefined;
 				}
+			);
 
-				// FALLBACK: Content changed between read and write!
-				// Delete from API to avoid ghost tasks
-				if (!found) {
-					console.error(`Task not found by full content match: ${task.line.substring(0, 50)}...`);
+			// Fallback: Check if any TIDs weren't written (ghost tasks)
+			for (const [taskLine, tid] of tidMapping) {
+				if (!writtenTIDs.has(tid)) {
+					console.error(`Task not found during editor.processLines(): ${taskLine.substring(0, 50)}...`);
 					new Notice(`Task disappeared during sync - deleting from Todoist`);
-
-					// Delete from API immediately
-					syncBatchDelete(settings.todoistAPIToken, [realTID])
+					syncBatchDelete(settings.todoistAPIToken, [tid])
 						.catch(err => console.error('Failed to delete ghost task:', err));
 				}
 			}
 
-			return currentLines.join('\n');
-		});
+		} else {
+			// Background file: Use vault.process() (existing logic)
+			console.log('Writing TIDs using Vault API (background file)');
+
+			await vault.process(file, (currentContent) => {
+				const currentLines = currentContent.split('\n');
+
+				// Process in ORDER (handles duplicate content!)
+				for (let i = 0; i < newTasks.length; i++) {
+					const task = newTasks[i];
+					const tempId = `new-${i}`;
+					const realTID = response.temp_id_mapping[tempId];
+
+					if (!realTID) {
+						console.error(`No TID mapping for temp_id: ${tempId}`);
+						continue;
+					}
+
+					// Find first occurrence of EXACT content (order matters!)
+					let found = false;
+					for (let lineIdx = 0; lineIdx < currentLines.length; lineIdx++) {
+						const currentLine = currentLines[lineIdx];
+
+						// Match by FULL content AND no TID yet
+						if (currentLine === task.line && extractTID(currentLine) === null) {
+							// Found it! Add TID and enforce ordering
+							const taskData = parseTaskLine(currentLine);
+							if (taskData) {
+								taskData.tid = realTID;
+								currentLines[lineIdx] = buildTaskLine(taskData, frontmatterLabels);
+
+								// Add to DB
+								db.setTask(realTID, {
+									tid: realTID,
+									filepath: file.path,
+									content: taskData.content,
+									completed: taskData.completed,
+									dueDate: taskData.dueDate,
+									dueTime: taskData.dueTime,
+									dueDatetime: taskData.dueDatetime,
+									priority: taskData.priority,
+									duration: taskData.duration,
+									labels: ['tdsync', ...frontmatterLabels, ...taskData.labels],
+									lastSyncedAt: Date.now(),
+									pending_changes: []
+								});
+
+								found = true;
+								break;  // Move to next task
+							}
+						}
+					}
+
+					// FALLBACK: Content changed between read and write!
+					// Delete from API to avoid ghost tasks
+					if (!found) {
+						console.error(`Task not found by full content match: ${task.line.substring(0, 50)}...`);
+						new Notice(`Task disappeared during sync - deleting from Todoist`);
+
+						// Delete from API immediately
+						syncBatchDelete(settings.todoistAPIToken, [realTID])
+							.catch(err => console.error('Failed to delete ghost task:', err));
+					}
+				}
+
+				return currentLines.join('\n');
+			});
+		}
 
 	} catch (error) {
 		console.error('Failed to create new tasks:', error);
@@ -214,6 +320,7 @@ async function processNewTasks(
  * @param file - File containing existing tasks
  * @param existingTasks - Array of tasks with TIDs
  * @param vault - Obsidian vault
+ * @param editor - Editor (if active file), null otherwise
  * @param db - Database instance
  * @param settings - Plugin settings
  */
@@ -221,6 +328,7 @@ async function processExistingTasks(
 	file: TFile,
 	existingTasks: Array<{ lineNum: number; line: string; tid: string | null }>,
 	vault: Vault,
+	editor: Editor | null,
 	db: Database,
 	settings: SyncSettings
 ): Promise<void> {
@@ -298,7 +406,7 @@ async function processExistingTasks(
 	}
 
 	// Now resolve conflicts and apply updates
-	await resolveAndApplyUpdates(file, vault, db, settings);
+	await resolveAndApplyUpdates(file, vault, editor, db, settings);
 }
 
 /**
@@ -307,12 +415,14 @@ async function processExistingTasks(
  *
  * @param file - File to update
  * @param vault - Obsidian vault
+ * @param editor - Editor (if active file), null otherwise
  * @param db - Database instance
  * @param settings - Plugin settings
  */
 async function resolveAndApplyUpdates(
 	file: TFile,
 	vault: Vault,
+	editor: Editor | null,
 	db: Database,
 	settings: SyncSettings
 ): Promise<void> {
@@ -419,29 +529,69 @@ async function resolveAndApplyUpdates(
 		}
 	}
 
-	// Apply file updates (one by one with vault.process)
-	// k-note lines 1599-1644
-	for (const update of fileUpdates) {
-		try {
-			await vault.process(file, (content) => {
-				const lines = content.split('\n');
-				const tidPattern = new RegExp(`%%\\[tid:: \\[${update.tid}\\]`);
+	// Apply file updates
+	// Use editor.processLines() for active files (preserves cursor)
+	// Use vault.process() for background files (atomic)
+	if (fileUpdates.length > 0) {
+		if (editor) {
+			// Active file: Use editor.processLines() for all updates atomically
+			console.log(`Applying ${fileUpdates.length} file updates using Editor API (active file)`);
 
-				// Search for task by TID in file AGAIN (might have moved)
-				for (let i = 0; i < lines.length; i++) {
-					if (tidPattern.test(lines[i])) {
-						// Found task - update it
-						lines[i] = update.newContent;
-						console.log(`Updated task ${update.tid} in file`);
-						break;
+			// Create TID → content mapping
+			const updateMapping = new Map<string, string>();
+			for (const update of fileUpdates) {
+				updateMapping.set(update.tid, update.newContent);
+			}
+
+			editor.processLines<string | null>(
+				// Phase 1: Identify lines that need updates
+				(lineNum, lineText) => {
+					const tid = extractTID(lineText);
+					if (tid && updateMapping.has(tid)) {
+						return updateMapping.get(tid)!;
 					}
+					return null;
+				},
+				// Phase 2: Generate changes for matched lines
+				(lineNum, lineText, newContent) => {
+					if (newContent && newContent !== lineText) {
+						return {
+							from: { line: lineNum, ch: 0 },
+							to: { line: lineNum, ch: lineText.length },
+							text: newContent
+						};
+					}
+					return undefined;
 				}
+			);
 
-				return lines.join('\n');
-			});
-		} catch (error) {
-			console.error(`Failed to update task ${update.tid} in file:`, error);
-			// Continue with next task
+		} else {
+			// Background file: Use vault.process() (existing logic, one by one)
+			console.log(`Applying ${fileUpdates.length} file updates using Vault API (background file)`);
+
+			for (const update of fileUpdates) {
+				try {
+					await vault.process(file, (content) => {
+						const lines = content.split('\n');
+						const tidPattern = new RegExp(`%%\\[tid:: \\[${update.tid}\\]`);
+
+						// Search for task by TID in file AGAIN (might have moved)
+						for (let i = 0; i < lines.length; i++) {
+							if (tidPattern.test(lines[i])) {
+								// Found task - update it
+								lines[i] = update.newContent;
+								console.log(`Updated task ${update.tid} in file`);
+								break;
+							}
+						}
+
+						return lines.join('\n');
+					});
+				} catch (error) {
+					console.error(`Failed to update task ${update.tid} in file:`, error);
+					// Continue with next task
+				}
+			}
 		}
 	}
 }

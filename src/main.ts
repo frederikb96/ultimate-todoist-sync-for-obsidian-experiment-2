@@ -88,6 +88,7 @@ export default class TodoistSyncPlugin extends Plugin {
 			await runSync(
 				this.app.vault,
 				this.app.metadataCache,
+				this.app.workspace,
 				this.db,
 				this.settings,
 				true,  // Skip active file
@@ -132,6 +133,7 @@ export default class TodoistSyncPlugin extends Plugin {
 			await runSync(
 				this.app.vault,
 				this.app.metadataCache,
+				this.app.workspace,
 				this.db,
 				this.settings,
 				false,  // Process active file
