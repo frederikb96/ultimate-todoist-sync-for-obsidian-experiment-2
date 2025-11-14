@@ -159,6 +159,13 @@ async function processNewTasks(
 		// Step 3: Write TIDs back to file
 		// Use editor.processLines() for active files (preserves cursor)
 		// Use vault.process() for background files (atomic)
+		//
+		// KNOWN LIMITATION: Content-based matching
+		// If user has duplicate task content (two tasks with identical text),
+		// only the first occurrence will receive a TID. The second task will
+		// fail content match (first task now has TID) and be deleted from API.
+		// This is an acceptable edge case - duplicate content is rare and
+		// deduplication may even be desired behavior.
 		if (editor) {
 			// Active file: Use editor.processLines()
 			console.log('Writing TIDs using Editor API (active file)');

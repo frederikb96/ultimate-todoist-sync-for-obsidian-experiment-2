@@ -1,11 +1,12 @@
-// Active File Handler - Special handling for active file during manual sync
-// NOTE: This module is created for FUTURE enhancement.
-// Currently, the sync engine uses vault.process() for ALL files (including active).
-// This works acceptably even for active files during manual sync.
+// Active File Handler - Reference implementation for editor-based operations
 //
-// This module provides editor-based operations if we want to implement special
-// handling for active files in the future (e.g., preserving cursor position,
-// reading unflushed editor buffer, etc.)
+// NOTE: This module contains reference implementations of editor operations.
+// The actual implementation uses editor.processLines() directly in syncProcessor.ts
+// for atomic multi-line updates with automatic cursor preservation.
+//
+// These functions demonstrate alternative approaches using editor.replaceRange()
+// for single-line updates with manual cursor management. Kept for reference
+// in case future enhancements need different editor interaction patterns.
 
 import { App, MarkdownView, TFile, Editor } from 'obsidian';
 
