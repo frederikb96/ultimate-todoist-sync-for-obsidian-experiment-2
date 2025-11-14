@@ -13,7 +13,7 @@ export default class TodoistSyncPlugin extends Plugin {
 	isSyncInProgress = false;
 
 	async onload() {
-		console.log('Todoist Sync 2.0 - Loading');
+		console.log('Another Even Simpler Todoist Sync - Loading');
 
 		// Load settings from data.json
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -30,7 +30,7 @@ export default class TodoistSyncPlugin extends Plugin {
 			this.startScheduledSync();
 		}
 
-		console.log('Todoist Sync 2.0 - Loaded');
+		console.log('Another Even Simpler Todoist Sync - Loaded');
 	}
 
 	async onunload() {
@@ -40,7 +40,7 @@ export default class TodoistSyncPlugin extends Plugin {
 		// Save settings
 		await this.saveSettings();
 
-		console.log('Todoist Sync 2.0 - Unloaded');
+		console.log('Another Even Simpler Todoist Sync - Unloaded');
 	}
 
 	/**

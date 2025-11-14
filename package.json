@@ -1,14 +1,14 @@
 {
-	"name": "simple-todoist-sync",
+	"name": "another-even-simpler-todoist-sync",
 	"version": "2.0.0",
-	"description": "DB-centric bidirectional sync with Todoist.",
+	"description": "Dead-simple bidirectional Todoist sync. Frontmatter control, reliable queue system, local-only.",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node npm_scripts/esbuild.config.mjs",
 		"build": "tsc -noEmit -skipLibCheck && node npm_scripts/esbuild.config.mjs production"
 	},
-	"keywords": [],
-	"author": "",
+	"keywords": ["obsidian", "todoist", "sync", "tasks"],
+	"author": "Frederik Berg",
 	"license": "GNU GPLv3",
 	"devDependencies": {
 		"@types/node": "^16.11.6",
