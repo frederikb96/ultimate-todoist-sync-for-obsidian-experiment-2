@@ -19,9 +19,9 @@ export function escapeRegex(str: string): string {
 	return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Parse TID from task line (%%[tid:: [123456789]]%%)
+// Parse TID from task line (%%[tid:: [6fFj3wQx8h8HfQWG]]%%)
 export function extractTID(line: string): string | null {
-	const tidPattern = /%%\[tid:: \[(\d+)\]/;
+	const tidPattern = /%%\[tid:: \[([A-Za-z0-9]+)\]/;
 	const match = line.match(tidPattern);
 	return match ? match[1] : null;
 }
