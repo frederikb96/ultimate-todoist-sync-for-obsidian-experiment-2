@@ -290,15 +290,20 @@ export async function processFilesSequentially(
 ): Promise<void> {
 	console.log(`Processing ${files.length} files sequentially...`);
 
+	// Track queued file paths to avoid duplicates when appending moved tasks
+	const queuedPaths = new Set<string>(files.map(f => f.path));
+
 	// Process ONE FILE AT A TIME (sequential, NOT parallel!)
 	// This is CRITICAL for move detection - k-note lines 1689-1730
+	// NOTE: files.length is re-evaluated each iteration, so appended files get processed!
 	for (let i = 0; i < files.length; i++) {
 		const file = files[i];
 		console.log(`Processing file ${i + 1}/${files.length}: ${file.path}`);
 
 		try {
 			// Process this file completely before moving to next
-			await processFile(file, vault, metadataCache, workspace, db, settings);
+			// Pass files array and queuedPaths so moved tasks can be queued
+			await processFile(file, vault, metadataCache, workspace, db, settings, files, queuedPaths);
 
 		} catch (error) {
 			console.error(`Error processing file ${file.path}:`, error);

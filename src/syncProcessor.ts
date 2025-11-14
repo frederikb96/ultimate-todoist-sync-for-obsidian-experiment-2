@@ -30,7 +30,9 @@ export async function processFile(
 	metadataCache: MetadataCache,
 	workspace: Workspace,
 	db: Database,
-	settings: SyncSettings
+	settings: SyncSettings,
+	files: TFile[],
+	queuedPaths: Set<string>
 ): Promise<void> {
 	console.log(`Processing file: ${file.path}`);
 
@@ -79,18 +81,16 @@ export async function processFile(
 
 	console.log(`New tasks: ${newTasks.length}, Existing tasks: ${existingTasks.length}`);
 
-	// Bidirectional check: DB → File (detect moved/deleted tasks)
-	// Do this FIRST, before any API calls, using already-extracted task list
-	await bidirectionalCheck(file, existingTasks, vault, metadataCache, db);
+	// COMPREHENSIVE TASK RECONCILIATION
+	// Handles File→DB and DB→File, detects moves/deletions/changes, queues moved files
+	await reconcileFileTasks(file, existingTasks, vault, metadataCache, db, files, queuedPaths);
+
+	// Resolve all pending changes for this file (conflicts, API updates, file write-back)
+	await resolveAndApplyUpdates(file, vault, editor, db, settings);
 
 	// Process new tasks (create on Todoist API, write TIDs back)
 	if (newTasks.length > 0) {
 		await processNewTasks(file, newTasks, vault, editor, db, settings, frontmatterLabels);
-	}
-
-	// Process existing tasks (detect changes, resolve conflicts, update)
-	if (existingTasks.length > 0) {
-		await processExistingTasks(file, existingTasks, vault, editor, db, settings);
 	}
 
 	console.log(`Finished processing file: ${file.path}`);
@@ -321,103 +321,6 @@ async function processNewTasks(
 }
 
 /**
- * Process existing tasks: detect changes, resolve conflicts, apply updates.
- * Implements bidirectional checking (File → DB).
- * k-note lines 2376-2432
- *
- * @param file - File containing existing tasks
- * @param existingTasks - Array of tasks with TIDs
- * @param vault - Obsidian vault
- * @param editor - Editor (if active file), null otherwise
- * @param db - Database instance
- * @param settings - Plugin settings
- */
-async function processExistingTasks(
-	file: TFile,
-	existingTasks: Array<{ lineNum: number; line: string; tid: string | null }>,
-	vault: Vault,
-	editor: Editor | null,
-	db: Database,
-	settings: SyncSettings
-): Promise<void> {
-	console.log(`Processing ${existingTasks.length} existing tasks...`);
-
-	// Direction 1: File → DB
-	// Check each task in file, compare with DB state
-	for (const task of existingTasks) {
-		if (!task.tid) continue;  // Should not happen (filtered above)
-
-		const dbTask = db.getTask(task.tid);
-
-		if (!dbTask) {
-			// Task has TID but NOT in DB - moved from different file or orphaned
-			console.warn(`Task ${task.tid} not in DB, adding...`);
-
-			const taskData = parseTaskLine(task.line);
-			if (taskData) {
-				db.setTask(task.tid, {
-					tid: task.tid,
-					filepath: file.path,
-					content: taskData.content,
-					completed: taskData.completed,
-					dueDate: taskData.dueDate,
-					dueTime: taskData.dueTime,
-					dueDatetime: taskData.dueDatetime,
-					priority: taskData.priority,
-					duration: taskData.duration,
-					labels: taskData.labels,
-					lastSyncedAt: Date.now(),
-					pending_changes: []
-				});
-			}
-			continue;
-		}
-
-		// Task exists in DB - check if moved to this file
-		if (dbTask.filepath !== file.path) {
-			console.log(`Task ${task.tid} moved from ${dbTask.filepath} to ${file.path}`);
-			dbTask.filepath = file.path;
-		}
-
-		// Compare content with DB state - detect local changes
-		const currentTaskData = parseTaskLine(task.line);
-		if (!currentTaskData) {
-			console.warn(`Failed to parse task ${task.tid}`);
-			continue;
-		}
-
-		// Check if content changed
-		const contentChanged = currentTaskData.content !== dbTask.content;
-		const completedChanged = currentTaskData.completed !== dbTask.completed;
-		const dueDateChanged = currentTaskData.dueDate !== dbTask.dueDate;
-		const priorityChanged = currentTaskData.priority !== dbTask.priority;
-		const durationChanged = currentTaskData.duration !== dbTask.duration;
-
-		if (contentChanged || completedChanged || dueDateChanged || priorityChanged || durationChanged) {
-			// Local changes detected - add to pending_changes
-			console.log(`Local changes detected for task ${task.tid}`);
-
-			dbTask.pending_changes.push({
-				source: 'local',
-				timestamp: file.stat.mtime,  // Use file modification time
-				changes: {
-					content: currentTaskData.content,
-					completed: currentTaskData.completed,
-					dueDate: currentTaskData.dueDate,
-					dueDatetime: currentTaskData.dueDatetime,
-					priority: currentTaskData.priority,
-					duration: currentTaskData.duration,
-					labels: currentTaskData.labels
-				}
-			});
-		}
-	}
-
-	// Now resolve conflicts and apply updates
-	await resolveAndApplyUpdates(file, vault, editor, db, settings);
-}
-
-/**
  * Resolve conflicts and apply updates for all tasks with pending changes.
  * Batch updates to Todoist, then write back to Obsidian.
  *
@@ -642,38 +545,98 @@ async function resolveAndApplyUpdates(
 }
 
 /**
- * Bidirectional check: DB → File
- * Detects tasks that moved out of file or were deleted.
- * k-note lines 2677-2683
+ * Comprehensive task reconciliation: File ↔ DB bidirectional sync.
+ * Replaces old bidirectionalCheck and processExistingTasks functions.
  *
- * OPTIMIZATION: Now runs BEFORE processNewTasks(), using already-extracted task list.
- * No need to re-read file - we already have all TIDs from the initial parse.
- * This is faster, simpler, and catches deletions earlier (before any API calls).
+ * This function does EVERYTHING about task state reconciliation:
+ * - Part 1: File → DB (check each task IN the file against DB)
+ * - Part 2: DB → File (check each DB task for THIS filepath against file)
+ * - Detects: moves, deletions, local changes
+ * - Queues: files where moved tasks are found (for processing)
+ * - Updates: DB state immediately (filepath, pending_changes)
  *
- * @param file - Current file
+ * @param file - Current file being processed
  * @param existingTasks - Tasks with TIDs found in file (from initial parse)
  * @param vault - Obsidian vault
  * @param metadataCache - Metadata cache
  * @param db - Database instance
+ * @param files - Files array (for appending moved task destinations)
+ * @param queuedPaths - Set of already-queued file paths (deduplication)
  */
-async function bidirectionalCheck(
+async function reconcileFileTasks(
 	file: TFile,
 	existingTasks: Array<{ lineNum: number; line: string; tid: string | null }>,
 	vault: Vault,
 	metadataCache: MetadataCache,
-	db: Database
+	db: Database,
+	files: TFile[],
+	queuedPaths: Set<string>
 ): Promise<void> {
-	console.log(`Bidirectional check for file: ${file.path}`);
+	console.log(`Reconciling tasks for file: ${file.path}`);
 
-	// Get all DB tasks for this file
+	// PART 1: File → DB
+	// Check each task that EXISTS in the file
+	for (const task of existingTasks) {
+		if (!task.tid) continue;  // Should never happen (existingTasks are filtered)
+
+		const dbTask = db.getTask(task.tid);
+
+		if (!dbTask) {
+			// Task has TID but NOT in our DB - orphaned/corrupted
+			// This shouldn't happen in normal operation (DB lost or manual TID added)
+			console.error(`Orphaned task ${task.tid} found in file but not in DB:`, task.line.substring(0, 50));
+			new Notice(`Found task with unknown ID in ${file.basename} - skipping`);
+			continue;  // Skip this task - we can't manage what we don't track
+		}
+
+		// Task exists in DB - check if it moved TO this file
+		if (dbTask.filepath !== file.path) {
+			console.log(`Task ${task.tid} moved from ${dbTask.filepath} to ${file.path}`);
+			dbTask.filepath = file.path;  // Update DB filepath immediately
+		}
+
+		// Compare task content with DB - detect local changes
+		const currentTaskData = parseTaskLine(task.line);
+		if (!currentTaskData) {
+			console.warn(`Failed to parse task ${task.tid}:`, task.line.substring(0, 50));
+			continue;
+		}
+
+		// Check if any field changed
+		const contentChanged = currentTaskData.content !== dbTask.content;
+		const completedChanged = currentTaskData.completed !== dbTask.completed;
+		const dueDateChanged = currentTaskData.dueDate !== dbTask.dueDate;
+		const priorityChanged = currentTaskData.priority !== dbTask.priority;
+		const durationChanged = currentTaskData.duration !== dbTask.duration;
+
+		if (contentChanged || completedChanged || dueDateChanged || priorityChanged || durationChanged) {
+			// Local changes detected - add to pending_changes
+			console.log(`Local changes detected for task ${task.tid}`);
+			dbTask.pending_changes.push({
+				source: 'local',
+				timestamp: file.stat.mtime,  // Use file modification time
+				changes: {
+					content: currentTaskData.content,
+					completed: currentTaskData.completed,
+					dueDate: currentTaskData.dueDate,
+					dueDatetime: currentTaskData.dueDatetime,
+					priority: currentTaskData.priority,
+					duration: currentTaskData.duration,
+					labels: currentTaskData.labels
+				}
+			});
+		}
+	}
+
+	// PART 2: DB → File
+	// Check each task that DB thinks belongs to THIS file
 	const dbTasksForFile = db.getTasksForFile(file.path);
 
 	if (dbTasksForFile.length === 0) {
-		return;  // No tasks in DB for this file
+		return;  // No DB tasks for this file, nothing more to check
 	}
 
-	// Collect TIDs present in file (from already-parsed existingTasks)
-	// No need to re-read file - we have the data from line 77-78!
+	// Collect TIDs present in file for fast lookup
 	const tidsInFile = new Set<string>();
 	for (const task of existingTasks) {
 		if (task.tid) {
@@ -681,28 +644,38 @@ async function bidirectionalCheck(
 		}
 	}
 
-	// Check each DB task - is it in file?
+	// Check each DB task - is it actually in the file?
 	for (const [tid, dbTask] of dbTasksForFile) {
-		if (!tidsInFile.has(tid)) {
-			// Task in DB but NOT in file - moved or deleted!
-			console.log(`Task ${tid} not found in file, searching vault...`);
+		if (tidsInFile.has(tid)) {
+			// Task found in file - already handled in Part 1
+			continue;
+		}
 
-			// Vault-wide TID search
-			const newLocation = await searchVaultForTID(tid, vault, metadataCache, file);
+		// Task in DB but NOT in file - moved or deleted!
+		console.log(`Task ${tid} not found in file, searching vault...`);
 
-			if (newLocation) {
-				// Task MOVED to different file
-				console.log(`Task ${tid} moved from ${file.path} to ${newLocation.path}`);
-				dbTask.filepath = newLocation.path;
-			} else {
-				// Task DELETED from Obsidian
-				console.log(`Task ${tid} deleted from vault`);
-				dbTask.pending_changes.push({
-					source: 'local',
-					timestamp: Date.now(),
-					changes: { deleted: true }
-				});
+		// Search vault-wide for this TID
+		const newLocation = await searchVaultForTID(tid, vault, metadataCache, file);
+
+		if (newLocation) {
+			// Task MOVED to different file
+			console.log(`Task ${tid} moved from ${file.path} to ${newLocation.path}`);
+			dbTask.filepath = newLocation.path;  // Update DB filepath
+
+			// Queue the destination file for processing (if not already queued)
+			if (!queuedPaths.has(newLocation.path)) {
+				console.log(`Queueing moved task destination: ${newLocation.path}`);
+				files.push(newLocation);
+				queuedPaths.add(newLocation.path);
 			}
+		} else {
+			// Task DELETED from Obsidian (not found anywhere)
+			console.log(`Task ${tid} deleted from vault`);
+			dbTask.pending_changes.push({
+				source: 'local',
+				timestamp: Date.now(),
+				changes: { deleted: true }
+			});
 		}
 	}
 }
