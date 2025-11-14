@@ -199,16 +199,17 @@ export async function pullFromTodoist(
 		// On initial sync (full_sync), also fetch completed tasks
 		// Sync API with sync_token="*" only returns ACTIVE tasks, NOT completed tasks
 		let completedTasks: any[] = [];
-		if (response.full_sync) {
-			console.log('Initial sync detected - fetching completed tasks from last 3 months...');
+		if (response.full_sync && settings.completedTasksLookbackDays > 0) {
+			const days = settings.completedTasksLookbackDays;
+			console.log(`Initial sync detected - fetching completed tasks from last ${days} days...`);
 
-			// Calculate date range (3 months back from now)
+			// Calculate date range (N days back from now)
 			const now = new Date();
-			const threeMonthsAgo = new Date();
-			threeMonthsAgo.setMonth(now.getMonth() - 3);
+			const lookbackDate = new Date();
+			lookbackDate.setDate(now.getDate() - days);
 
 			// Format dates as RFC3339 (ISO 8601)
-			const since = threeMonthsAgo.toISOString();
+			const since = lookbackDate.toISOString();
 			const until = now.toISOString();
 
 			// Fetch all completed tasks (handles pagination internally)
@@ -217,8 +218,10 @@ export async function pullFromTodoist(
 
 			// Show notice to user
 			if (completedTasks.length > 0) {
-				new Notice(`Initial sync: Found ${response.items.length} active + ${completedTasks.length} completed tasks`);
+				new Notice(`Initial sync: Found ${response.items.length} active + ${completedTasks.length} completed tasks (${days} days)`);
 			}
+		} else if (response.full_sync && settings.completedTasksLookbackDays === 0) {
+			console.log('Initial sync detected but completedTasksLookbackDays=0, skipping completed tasks fetch');
 		}
 
 		// Combine active + completed tasks for processing

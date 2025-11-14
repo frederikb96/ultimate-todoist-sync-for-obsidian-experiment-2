@@ -117,12 +117,6 @@ export async function fetchCompletedTasks(
 			// Update cursor for next page
 			cursor = data.next_cursor;
 
-			// Safety limit to prevent infinite loops
-			if (pageCount > 50) {
-				console.warn('Reached 50 pages while fetching completed tasks, stopping pagination');
-				break;
-			}
-
 		} while (cursor !== null);
 
 		console.log(`Completed task fetch finished: ${allTasks.length} tasks from ${pageCount} pages`);

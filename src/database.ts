@@ -31,6 +31,9 @@ export const DEFAULT_SETTINGS: SyncSettings = {
 	// Conflict Resolution (API wins by default)
 	conflictResolutionWindow: 60,  // +60 seconds
 
+	// Migration & Initial Sync
+	completedTasksLookbackDays: 90,  // 90 days (3 months, max API allows)
+
 	// Internal State
 	syncToken: '*',  // Full sync on first run
 	lastSync: 0,

@@ -19,11 +19,30 @@ export class TodoistSettingTab extends PluginSettingTab {
 		containerEl.createEl('h3', { text: 'Migration' });
 
 		const migrationDesc = containerEl.createEl('p', { cls: 'setting-item-description' });
-		migrationDesc.setText('Import existing tasks with Todoist IDs from your notes into the database. Required for first-time setup if you already have synced tasks.');
+		migrationDesc.setText('Import existing tasks with Todoist IDs from your notes into the database. Required for first-time setup if you already have synced tasks. After import, a sync will automatically start.');
+
+		new Setting(containerEl)
+			.setName('Completed Tasks Lookback')
+			.setDesc('Days to look back when fetching completed tasks during migration (max: 90)')
+			.addText(text => text
+				.setPlaceholder('90')
+				.setValue(String(this.plugin.settings.completedTasksLookbackDays))
+				.onChange(async (value) => {
+					const num = parseInt(value);
+					if (!isNaN(num) && num >= 0) {
+						// Cap at 90 days (Todoist API 3-month limit)
+						this.plugin.settings.completedTasksLookbackDays = Math.min(num, 90);
+						await this.plugin.saveSettings();
+						// Update display if capped
+						if (num > 90) {
+							text.setValue('90');
+						}
+					}
+				}));
 
 		new Setting(containerEl)
 			.setName('Import Existing Tasks')
-			.setDesc('Scan all files with frontmatter and import tasks that have Todoist IDs')
+			.setDesc('Scan all files with frontmatter and import tasks. Automatically syncs after import.')
 			.addButton(button => button
 				.setButtonText('Import Tasks')
 				.setDisabled(!this.plugin.settings.apiInitialized)
@@ -196,7 +215,7 @@ class MigrationConfirmModal extends Modal {
 		ul.createEl('li', { text: 'Tasks must have existing Todoist IDs (%%[tid:: ...]%%)' });
 
 		contentEl.createEl('p', {
-			text: 'After migration, trigger a sync. On first sync, Todoist will overwrite local changes if conflicts exist.'
+			text: 'After migration completes, a sync will automatically start. This ensures completed tasks are fetched and all changes from Todoist are reconciled.'
 		});
 
 		const buttonContainer = contentEl.createDiv({ cls: 'modal-button-container' });

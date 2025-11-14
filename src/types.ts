@@ -40,6 +40,10 @@ export interface SyncSettings {
 	// Positive: API wins within window
 	// Negative: Local wins within window
 
+	// Migration & Initial Sync
+	completedTasksLookbackDays: number;  // default: 90 days (max: 90 due to API limit)
+	// How many days back to fetch completed tasks during initial sync
+
 	// Internal State
 	syncToken: string;  // Todoist Sync API token (start with "*" for full sync)
 	lastSync: number;   // Last sync timestamp (milliseconds)

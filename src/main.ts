@@ -242,12 +242,21 @@ export default class TodoistSyncPlugin extends Plugin {
 				// Save settings (persists syncToken="*" change)
 				await this.saveSettings();
 
-				// Show success message with next steps
+				// Show success message and indicate auto-sync starting
 				new Notice(
-					`Migration complete! ${result.taskCount} tasks imported.\n\nNext: Trigger a sync to pull latest changes from Todoist.`,
-					10000 // Show for 10 seconds
+					`Migration complete! ${result.taskCount} tasks imported.\n\nStarting automatic sync...`,
+					8000 // Show for 8 seconds
 				);
 				console.log(`Migration successful: ${result.taskCount} tasks imported`);
+
+				// Auto-trigger manual sync after migration
+				// Use manual sync (skipActiveFile=false) to ensure complete reconciliation
+				console.log('Auto-triggering sync after migration...');
+
+				// Small delay to let user see migration complete notice
+				setTimeout(async () => {
+					await this.manualSync();
+				}, 1000);
 			} else {
 				// Show error message
 				new Notice(result.error || 'Migration failed', 15000);
