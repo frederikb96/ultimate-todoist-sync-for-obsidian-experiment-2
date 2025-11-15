@@ -17,7 +17,7 @@ import { processFile } from './syncProcessor';
  * @param workspace - Obsidian workspace (for active file detection)
  * @param db - Database instance
  * @param settings - Plugin settings
- * @param skipActiveFile - If true, skip active file (for scheduled sync)
+ * @param showSuccessNotice - If true, show success notice (for manual sync)
  * @param plugin - Plugin instance (for saving data)
  */
 export async function runSync(
@@ -26,23 +26,17 @@ export async function runSync(
 	workspace: Workspace,
 	db: Database,
 	settings: SyncSettings,
-	skipActiveFile: boolean,
+	showSuccessNotice: boolean,
 	plugin: Plugin
 ): Promise<void> {
-	console.log('Starting sync...', { skipActiveFile, lastSync: new Date(settings.lastSync) });
+	console.log('Starting sync...', { showSuccessNotice, lastSync: new Date(settings.lastSync) });
 
 	try {
-		// Get active file path if skipping
-		const activeFilePath = skipActiveFile
-			? plugin.app.workspace.getActiveFile()?.path
-			: undefined;
-
 		// Step 1: Get modified files (frontmatter filter + mtime check)
 		const modifiedFiles = getModifiedFiles(
 			vault,
 			metadataCache,
-			settings.lastSync,
-			activeFilePath
+			settings.lastSync
 		);
 		console.log(`Found ${modifiedFiles.length} modified files to process`);
 
@@ -81,10 +75,15 @@ export async function runSync(
 		await saveDatabase(plugin, settings);
 
 		console.log('Sync completed successfully');
-		new Notice(`Sync completed: ${allFilesToProcess.length} files processed (${modifiedFiles.length} local, ${filesWithPendingChanges.length} pending)`);
+
+		// Show success notice only if requested (manual sync shows, scheduled doesn't)
+		if (showSuccessNotice) {
+			new Notice(`Sync completed: ${allFilesToProcess.length} files processed (${modifiedFiles.length} local, ${filesWithPendingChanges.length} pending)`);
+		}
 
 	} catch (error) {
 		console.error('Sync failed:', error);
+		// Error notice ALWAYS shown (both manual and scheduled)
 		new Notice(`Sync error: ${error instanceof Error ? error.message : 'Unknown error'}`);
 		throw error;
 	}
@@ -133,19 +132,18 @@ export function getFilesWithPendingChanges(
  * Filters by:
  * 1. todoist-sync: true frontmatter (via MetadataCache - instant!)
  * 2. file.stat.mtime > lastSync (filesystem modification time)
- * 3. Skip active file if provided
+ *
+ * Active files are now ALWAYS processed (no longer skipped for scheduled sync).
  *
  * @param vault - Obsidian vault
  * @param metadataCache - Obsidian metadata cache
  * @param lastSync - Last sync timestamp (milliseconds)
- * @param activeFilePath - Path of active file to skip (if provided)
  * @returns Array of files to process
  */
 export function getModifiedFiles(
 	vault: Vault,
 	metadataCache: MetadataCache,
-	lastSync: number,
-	activeFilePath?: string
+	lastSync: number
 ): TFile[] {
 
 	// Get all markdown files
@@ -157,15 +155,8 @@ export function getModifiedFiles(
 		return cache?.frontmatter?.['todoist-sync'] === true;
 	});
 
-	// Filter by modification time AND skip active file
+	// Filter by modification time
 	const modifiedFiles = syncEnabledFiles.filter(file => {
-		// Skip active file if requested
-		if (activeFilePath && file.path === activeFilePath) {
-			console.log('Skipping active file:', file.path);
-			return false;
-		}
-
-		// Check if modified since last sync
 		return file.stat.mtime > lastSync;
 	});
 

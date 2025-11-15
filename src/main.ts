@@ -67,8 +67,8 @@ export default class TodoistSyncPlugin extends Plugin {
 
 	/**
 	 * Scheduled sync (called by interval timer).
-	 * Skips active file to avoid interfering with user edits.
-	 * Runs silently in background - no notices on success, only on error.
+	 * Processes ALL files including active file.
+	 * Runs silently in background - no success notices, only error notices.
 	 */
 	async scheduledSync(): Promise<void> {
 		// Guard: skip if sync already in progress
@@ -83,18 +83,18 @@ export default class TodoistSyncPlugin extends Plugin {
 			return;
 		}
 
-		console.log('Starting scheduled sync (skipping active file)...');
+		console.log('Starting scheduled sync (background operation)...');
 		this.isSyncInProgress = true;
 
 		try {
-			// skipActiveFile = true for scheduled sync
+			// showSuccessNotice = false for scheduled sync (silent background operation)
 			await runSync(
 				this.app.vault,
 				this.app.metadataCache,
 				this.app.workspace,
 				this.db,
 				this.settings,
-				true,  // Skip active file
+				false,  // Don't show success notice
 				this
 			);
 
@@ -103,7 +103,7 @@ export default class TodoistSyncPlugin extends Plugin {
 
 		} catch (error) {
 			console.error('Scheduled sync failed:', error);
-			// Show notice only on error (user should know if background sync failing)
+			// Error notice ALWAYS shown (user should know if background sync failing)
 			new Notice(`Background sync error: ${error instanceof Error ? error.message : 'Unknown error'}`);
 		} finally {
 			this.isSyncInProgress = false;
@@ -113,7 +113,7 @@ export default class TodoistSyncPlugin extends Plugin {
 	/**
 	 * Manual sync (called by user command).
 	 * Processes ALL files including active file.
-	 * Shows notices for feedback.
+	 * Shows start notice and detailed success notice.
 	 */
 	async manualSync(): Promise<void> {
 		// Guard: skip if sync already in progress
@@ -132,18 +132,18 @@ export default class TodoistSyncPlugin extends Plugin {
 		this.isSyncInProgress = true;
 
 		try {
-			// skipActiveFile = false for manual sync (process active file too!)
+			// showSuccessNotice = true for manual sync (user gets detailed feedback)
 			await runSync(
 				this.app.vault,
 				this.app.metadataCache,
 				this.app.workspace,
 				this.db,
 				this.settings,
-				false,  // Process active file
+				true,  // Show success notice with details
 				this
 			);
 
-			new Notice('Sync completed successfully!');
+			// Success notice shown by runSync with file counts
 			console.log('Manual sync completed successfully');
 
 		} catch (error) {
