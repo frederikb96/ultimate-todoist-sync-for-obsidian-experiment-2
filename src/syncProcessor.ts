@@ -706,9 +706,11 @@ function detectParentTidFromIndentInLines(lineNum: number, lines: string[]): str
 }
 
 /**
- * Find line number of last root task (indent = 0) in editor.
+ * Find line number of last root-level line (indent = 0) in editor.
+ * Finds ANY content at root level (tasks, headings, text, blank lines),
+ * not just root tasks. This prevents inserting tasks in wrong sections.
  * @param editor - Obsidian editor
- * @returns Line number of last root, or -1 if no roots exist
+ * @returns Line number of last root-level line, or -1 if none exist
  */
 function findLastRootLine(editor: Editor): number {
 	let lastRootLine = -1;
@@ -716,9 +718,9 @@ function findLastRootLine(editor: Editor): number {
 
 	for (let i = 0; i < totalLines; i++) {
 		const line = editor.getLine(i);
-		if (!isMarkdownTask(line)) continue;
-
 		const indent = getIndentLevel(line);
+
+		// Any line with indent=0 (task OR non-task content)
 		if (indent === 0) {
 			lastRootLine = i;
 		}
@@ -728,18 +730,20 @@ function findLastRootLine(editor: Editor): number {
 }
 
 /**
- * Find line number of last root task in lines array.
+ * Find line number of last root-level line (indent = 0) in lines array.
+ * Finds ANY content at root level (tasks, headings, text, blank lines),
+ * not just root tasks. This prevents inserting tasks in wrong sections.
  * @param lines - Array of file lines
- * @returns Line number of last root, or -1 if no roots exist
+ * @returns Line number of last root-level line, or -1 if none exist
  */
 function findLastRootLineInLines(lines: string[]): number {
 	let lastRootLine = -1;
 
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
-		if (!isMarkdownTask(line)) continue;
-
 		const indent = getIndentLevel(line);
+
+		// Any line with indent=0 (task OR non-task content)
 		if (indent === 0) {
 			lastRootLine = i;
 		}
