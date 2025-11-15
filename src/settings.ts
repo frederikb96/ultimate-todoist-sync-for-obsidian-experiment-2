@@ -15,51 +15,6 @@ export class TodoistSettingTab extends PluginSettingTab {
 
 		containerEl.createEl('h2', { text: 'Todoist Sync Settings' });
 
-		// Migration section (first-time setup)
-		containerEl.createEl('h3', { text: 'Migration' });
-
-		const migrationDesc = containerEl.createEl('p', { cls: 'setting-item-description' });
-		migrationDesc.setText('Import existing tasks with Todoist IDs from your notes into the database. Required for first-time setup if you already have synced tasks. After import, a sync will automatically start.');
-
-		new Setting(containerEl)
-			.setName('Completed Tasks Lookback')
-			.setDesc('Days to look back when fetching completed tasks during migration (max: 90)')
-			.addText(text => text
-				.setPlaceholder('90')
-				.setValue(String(this.plugin.settings.completedTasksLookbackDays))
-				.onChange(async (value) => {
-					const num = parseInt(value);
-					if (!isNaN(num) && num >= 0) {
-						// Cap at 90 days (Todoist API 3-month limit)
-						this.plugin.settings.completedTasksLookbackDays = Math.min(num, 90);
-						await this.plugin.saveSettings();
-						// Update display if capped
-						if (num > 90) {
-							text.setValue('90');
-						}
-					}
-				}));
-
-		new Setting(containerEl)
-			.setName('Import Existing Tasks')
-			.setDesc('Scan all files with frontmatter and import tasks. Automatically syncs after import.')
-			.addButton(button => button
-				.setButtonText('Import Tasks')
-				.setDisabled(!this.plugin.settings.apiInitialized)
-				.onClick(async () => {
-					// Show confirmation modal
-					new MigrationConfirmModal(this.app, this.plugin, async () => {
-						await this.plugin.runMigration();
-					}).open();
-				}));
-
-		if (!this.plugin.settings.apiInitialized) {
-			containerEl.createEl('p', {
-				text: 'Note: Configure API token and test connection before running migration.',
-				cls: 'setting-item-description mod-warning'
-			});
-		}
-
 		// API Token section
 		containerEl.createEl('h3', { text: 'Authentication' });
 
@@ -182,6 +137,51 @@ export class TodoistSettingTab extends PluginSettingTab {
 				.setName('Timezone')
 				.setDesc(this.plugin.settings.userData.tz_info.timezone)
 				.setDisabled(true);
+		}
+
+		// Migration section (for migrating from other plugins)
+		containerEl.createEl('h3', { text: 'Migration' });
+
+		const migrationDesc = containerEl.createEl('p', { cls: 'setting-item-description' });
+		migrationDesc.setText('Import existing tasks with Todoist IDs from your notes into the database. Required only if migrating from another Todoist sync plugin. After import, a sync will automatically start.');
+
+		new Setting(containerEl)
+			.setName('Completed Tasks Lookback')
+			.setDesc('Days to look back when fetching completed tasks during migration (max: 90)')
+			.addText(text => text
+				.setPlaceholder('90')
+				.setValue(String(this.plugin.settings.completedTasksLookbackDays))
+				.onChange(async (value) => {
+					const num = parseInt(value);
+					if (!isNaN(num) && num >= 0) {
+						// Cap at 90 days (Todoist API 3-month limit)
+						this.plugin.settings.completedTasksLookbackDays = Math.min(num, 90);
+						await this.plugin.saveSettings();
+						// Update display if capped
+						if (num > 90) {
+							text.setValue('90');
+						}
+					}
+				}));
+
+		new Setting(containerEl)
+			.setName('Import Existing Tasks')
+			.setDesc('Scan all files with frontmatter and import tasks. Automatically syncs after import.')
+			.addButton(button => button
+				.setButtonText('Import Tasks')
+				.setDisabled(!this.plugin.settings.apiInitialized)
+				.onClick(async () => {
+					// Show confirmation modal
+					new MigrationConfirmModal(this.app, this.plugin, async () => {
+						await this.plugin.runMigration();
+					}).open();
+				}));
+
+		if (!this.plugin.settings.apiInitialized) {
+			containerEl.createEl('p', {
+				text: 'Note: Configure API token and test connection before running migration.',
+				cls: 'setting-item-description mod-warning'
+			});
 		}
 	}
 }
