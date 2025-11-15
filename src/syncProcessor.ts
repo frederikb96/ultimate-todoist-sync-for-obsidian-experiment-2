@@ -631,6 +631,48 @@ function calculateIndentFromParentChain(
  * @param totalLines - Total number of lines in file (for fallback)
  * @returns Line number to insert at (0-based)
  */
+/**
+ * Calculate task depth in parent hierarchy (0 = root, 1 = child, 2 = grandchild, etc.)
+ * Used for sorting repositions to process parents before children.
+ *
+ * @param tid - Task ID
+ * @param db - Database instance
+ * @returns Depth (0 for root tasks)
+ */
+function calculateTaskDepth(
+	tid: string,
+	db: Database
+): number {
+	let depth = 0;
+	let currentTid: string | null | undefined = tid;
+	const visited = new Set<string>();
+	const MAX_DEPTH = 20;
+
+	while (depth < MAX_DEPTH) {
+		if (!currentTid) break;
+
+		// Circular reference detection
+		if (visited.has(currentTid)) {
+			console.warn(`Circular reference detected in parent chain for ${tid}`);
+			break;
+		}
+		visited.add(currentTid);
+
+		const task = db.getTask(currentTid);
+		if (!task) break;
+
+		if (!task.parent_tid) {
+			// Reached root
+			break;
+		}
+
+		depth++;
+		currentTid = task.parent_tid;
+	}
+
+	return depth;
+}
+
 function findSiblingInsertPosition(
 	taskTid: string,
 	parentTid: string | null,
@@ -994,8 +1036,20 @@ async function resolveAndApplyUpdates(
 				content: string;
 			}> = [];
 
-			for (const update of repositionUpdates) {
-				const currentLineNum = tidToLineNum.get(update.tid);
+			// BUG FIX #7: Sort by depth (parent-first) to avoid stale position lookups
+			// Calculate depth for each task and sort before processing
+			const repositionWithDepth = repositionUpdates.map(update => ({
+				update,
+				depth: calculateTaskDepth(update.tid, db)
+			}));
+			repositionWithDepth.sort((a, b) => a.depth - b.depth);  // Process roots first (depth 0), then children (depth 1), etc.
+
+			// BUG FIX #7: Create working copy of tidToLineNum that we update as we calculate positions
+			// This way children see their parents' NEW positions, not stale ones!
+			const workingTidToLineNum = new Map(tidToLineNum);
+
+			for (const {update, depth} of repositionWithDepth) {
+				const currentLineNum = tidToLineNum.get(update.tid);  // Original position
 				if (currentLineNum === undefined) {
 					console.warn(`Task ${update.tid} not found in file for repositioning`);
 					continue;
@@ -1008,8 +1062,8 @@ async function resolveAndApplyUpdates(
 					continue;
 				}
 
-				// Calculate indent from parent chain
-				const indent = calculateIndentFromParentChain(update.tid, db, tidToLineNum, fileLines);
+				// Calculate indent from parent chain (uses workingTidToLineNum for updated positions)
+				const indent = calculateIndentFromParentChain(update.tid, db, workingTidToLineNum, fileLines);
 
 				// Parse task data to rebuild with correct indent
 				const taskData = parseTaskLine(fileLines[currentLineNum]);
@@ -1023,12 +1077,13 @@ async function resolveAndApplyUpdates(
 				const newLineContent = buildTaskLineWithIndent(taskData, [], indent, indentUnit);
 
 				// Find insert position (after last sibling or after parent)
+				// CRITICAL: Use workingTidToLineNum so we see updated positions from earlier tasks!
 				const insertPos = findSiblingInsertPosition(
 					update.tid,
 					task.parent_tid || null,
 					file.path,
 					db,
-					tidToLineNum,
+					workingTidToLineNum,  // ← Use WORKING map with updated positions!
 					totalLines
 				);
 
@@ -1048,7 +1103,10 @@ async function resolveAndApplyUpdates(
 					content: newLineContent
 				});
 
-				console.log(`  Reposition queued: ${update.tid} from line ${currentLineNum} → ${clampedInsertPos} (indent=${indent})`);
+				// BUG FIX #7: Update working map with new position for next tasks to see!
+				workingTidToLineNum.set(update.tid, clampedInsertPos);
+
+				console.log(`  Reposition queued: ${update.tid} from line ${currentLineNum} → ${clampedInsertPos} (indent=${indent}, depth=${depth})`);
 			}
 
 			// Step 4: Build EditorChanges for repositioning
@@ -1129,15 +1187,25 @@ async function resolveAndApplyUpdates(
 				const linesToDelete = new Set<number>();
 				const inserts: Array<{ position: number; content: string }> = [];
 
-				for (const update of repositionUpdates) {
-					const currentLineNum = tidToLineNum.get(update.tid);
+				// BUG FIX #7: Sort by depth (parent-first) and use working copy (same as editor path)
+				const repositionWithDepth = repositionUpdates.map(update => ({
+					update,
+					depth: calculateTaskDepth(update.tid, db)
+				}));
+				repositionWithDepth.sort((a, b) => a.depth - b.depth);
+
+				// Create working copy of tidToLineNum for dynamic updates
+				const workingTidToLineNum = new Map(tidToLineNum);
+
+				for (const {update, depth} of repositionWithDepth) {
+					const currentLineNum = tidToLineNum.get(update.tid);  // Original position
 					if (currentLineNum === undefined) continue;
 
 					const task = db.getTask(update.tid);
 					if (!task) continue;
 
-					// Calculate indent
-					const indent = calculateIndentFromParentChain(update.tid, db, tidToLineNum, lines);
+					// Calculate indent (uses workingTidToLineNum)
+					const indent = calculateIndentFromParentChain(update.tid, db, workingTidToLineNum, lines);
 
 					// Parse and rebuild with indent
 					const taskData = parseTaskLine(lines[currentLineNum]);
@@ -1146,13 +1214,13 @@ async function resolveAndApplyUpdates(
 					taskData.tid = update.tid;
 					const newLineContent = buildTaskLineWithIndent(taskData, [], indent, indentUnit);
 
-					// Find insert position
+					// Find insert position (uses workingTidToLineNum)
 					const insertPos = findSiblingInsertPosition(
 						update.tid,
 						task.parent_tid || null,
 						file.path,
 						db,
-						tidToLineNum,
+						workingTidToLineNum,  // ← Use WORKING map!
 						lines.length
 					);
 
@@ -1161,6 +1229,9 @@ async function resolveAndApplyUpdates(
 					// Mark old line for deletion, queue insert
 					linesToDelete.add(currentLineNum);
 					inserts.push({ position: clampedInsertPos, content: newLineContent });
+
+					// Update working map with new position
+					workingTidToLineNum.set(update.tid, clampedInsertPos);
 				}
 
 				// Delete marked lines (from end to start to maintain indices)
@@ -1278,17 +1349,6 @@ async function reconcileFileTasks(
 		const labelsChanged = JSON.stringify(currentTaskData.labels) !== JSON.stringify(dbTask.labels);
 
 		if (contentChanged || completedChanged || dueDateChanged || dueDatetimeChanged || priorityChanged || durationChanged || labelsChanged || parentChanged) {
-			// BUG FIX #6: Prevent CASCADE BUG where our own writes trigger false "local changes"
-			// Check if file was recently modified by OUR sync (within 5 seconds of lastSyncedAt)
-			// If yes, skip creating local pending_changes because WE wrote that state, not the user
-			const recentlyModifiedByUs = dbTask.lastSyncedAt &&
-										 Math.abs(file.stat.mtime - dbTask.lastSyncedAt) < 5000;  // 5 second window
-
-			if (recentlyModifiedByUs) {
-				console.log(`Skipping local pending_changes for ${task.tid} - file modified by recent sync (mtime: ${new Date(file.stat.mtime)}, lastSync: ${new Date(dbTask.lastSyncedAt)})`);
-				continue;
-			}
-
 			// Local changes detected - add to pending_changes
 			console.log(`Local changes detected for task ${task.tid}${parentChanged ? ' (parent changed)' : ''}`);
 			dbTask.pending_changes.push({
