@@ -706,50 +706,51 @@ function detectParentTidFromIndentInLines(lineNum: number, lines: string[]): str
 }
 
 /**
- * Find line number of last root-level line (indent = 0) in editor.
- * Finds ANY content at root level (tasks, headings, text, blank lines),
- * not just root tasks. This prevents inserting tasks in wrong sections.
+ * Find next non-indented line starting from a position in editor.
+ * Scans FORWARD from startLine to find first line with indent=0.
+ * This could be heading, text, blank line, task - anything not indented.
+ * Used to insert root tasks in their current section, not at end of file.
+ * @param startLine - Line to start scanning from
  * @param editor - Obsidian editor
- * @returns Line number of last root-level line, or -1 if none exist
+ * @returns Line number of next non-indented line, or editor.lineCount() if none found
  */
-function findLastRootLine(editor: Editor): number {
-	let lastRootLine = -1;
+function findNextNonIndentedLine(startLine: number, editor: Editor): number {
 	const totalLines = editor.lineCount();
 
-	for (let i = 0; i < totalLines; i++) {
+	for (let i = startLine; i < totalLines; i++) {
 		const line = editor.getLine(i);
 		const indent = getIndentLevel(line);
 
-		// Any line with indent=0 (task OR non-task content)
+		// Found first line with no indentation (could be anything)
 		if (indent === 0) {
-			lastRootLine = i;
+			return i;
 		}
 	}
 
-	return lastRootLine;
+	// No non-indented line found after startLine - insert at end
+	return totalLines;
 }
 
 /**
- * Find line number of last root-level line (indent = 0) in lines array.
- * Finds ANY content at root level (tasks, headings, text, blank lines),
- * not just root tasks. This prevents inserting tasks in wrong sections.
+ * Find next non-indented line starting from a position in lines array.
+ * Scans FORWARD from startLine to find first line with indent=0.
+ * @param startLine - Line to start scanning from
  * @param lines - Array of file lines
- * @returns Line number of last root-level line, or -1 if none exist
+ * @returns Line number of next non-indented line, or lines.length if none found
  */
-function findLastRootLineInLines(lines: string[]): number {
-	let lastRootLine = -1;
-
-	for (let i = 0; i < lines.length; i++) {
+function findNextNonIndentedLineInLines(startLine: number, lines: string[]): number {
+	for (let i = startLine; i < lines.length; i++) {
 		const line = lines[i];
 		const indent = getIndentLevel(line);
 
-		// Any line with indent=0 (task OR non-task content)
+		// Found first line with no indentation
 		if (indent === 0) {
-			lastRootLine = i;
+			return i;
 		}
 	}
 
-	return lastRootLine;
+	// No non-indented line found - insert at end
+	return lines.length;
 }
 
 /**
@@ -1161,9 +1162,9 @@ async function resolveAndApplyUpdates(
 						// Find insert position
 						let insertPos: number;
 						if (expectedParent === null) {
-							// Task should be root - insert after last root
-							const lastRoot = findLastRootLine(editor);
-							insertPos = lastRoot + 1;
+							// Task should be root - find next non-indented line and insert BEFORE it
+							// This keeps the task in its current section instead of jumping to end of file
+							insertPos = findNextNonIndentedLine(currentLine, editor);
 						} else {
 							// Task should be child - insert after last child of parent
 							const lastChild = findLastChildLine(expectedParent, editor);
@@ -1270,9 +1271,9 @@ async function resolveAndApplyUpdates(
 							// Find insert position (after deletion, so indices may have shifted)
 							let insertPos: number;
 							if (expectedParent === null) {
-								// Task should be root - insert after last root
-								const lastRoot = findLastRootLineInLines(lines);
-								insertPos = lastRoot + 1;
+								// Task should be root - find next non-indented line and insert BEFORE it
+								// This keeps the task in its current section instead of jumping to end of file
+								insertPos = findNextNonIndentedLineInLines(currentLine, lines);
 							} else {
 								// Task should be child - insert after last child of parent
 								const lastChild = findLastChildLineInLines(expectedParent, lines);
