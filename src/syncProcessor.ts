@@ -564,76 +564,9 @@ async function processNewTasks(
 }
 
 /**
- * PHASE 5 HELPER: Calculate indent level from parent chain.
- * Traverses parent hierarchy in DB to determine nesting depth.
- *
- * @param taskTid - Task ID to calculate indent for
- * @param db - Database instance
- * @param tidToLineNum - Map of TID → line number (from current file scan)
- * @param fileLines - File content split by lines
- * @returns Indent level (0 = root, 1 = child, 2 = grandchild, etc.)
- */
-function calculateIndentFromParentChain(
-	taskTid: string,
-	db: Database,
-	tidToLineNum: Map<string, number>,
-	fileLines: string[]
-): number {
-	const visited = new Set<string>();
-	let currentTid: string | null = taskTid;
-	let depth = 0;
-	const MAX_DEPTH = 20;  // Prevent infinite loops
-
-	while (currentTid && depth < MAX_DEPTH) {
-		// Circular reference detection
-		if (visited.has(currentTid)) {
-			console.error(`Circular parent reference detected for task ${taskTid}`);
-			return 0;
-		}
-		visited.add(currentTid);
-
-		// Get parent from DB
-		const task = db.getTask(currentTid);
-		if (!task || !task.parent_tid) {
-			// Reached root or task not found
-			return depth;
-		}
-
-		// Check if parent exists in current file
-		const parentLineNum = tidToLineNum.get(task.parent_tid);
-		if (parentLineNum === undefined) {
-			// Parent not in file - can't calculate indent from it
-			console.warn(`Parent ${task.parent_tid} not found in file for task ${taskTid}, using indent=${depth}`);
-			return depth;
-		}
-
-		// Parent exists - continue up the chain
-		currentTid = task.parent_tid;
-		depth++;
-	}
-
-	if (depth >= MAX_DEPTH) {
-		console.error(`Max depth reached for task ${taskTid}, possible circular reference`);
-	}
-
-	return depth;
-}
-
-/**
- * PHASE 5 HELPER: Find insert position for repositioned task (after last sibling).
- * Queries DB for siblings, finds their current line numbers, returns position after last sibling.
- *
- * @param taskTid - Task ID being repositioned
- * @param parentTid - Parent task ID (null for root)
- * @param filepath - Current file path
- * @param db - Database instance
- * @param tidToLineNum - Map of TID → line number (from current file scan)
- * @param totalLines - Total number of lines in file (for fallback)
- * @returns Line number to insert at (0-based)
- */
-/**
  * Calculate task depth in parent hierarchy (0 = root, 1 = child, 2 = grandchild, etc.)
- * Used for sorting repositions to process parents before children.
+ * Used for level-by-level sequential processing in Phase 5.
+ * Walks up parent chain in DB to determine nesting depth.
  *
  * @param tid - Task ID
  * @param db - Database instance
@@ -673,58 +606,234 @@ function calculateTaskDepth(
 	return depth;
 }
 
-function findSiblingInsertPosition(
-	taskTid: string,
-	parentTid: string | null,
-	filepath: string,
-	db: Database,
-	tidToLineNum: Map<string, number>,
-	totalLines: number
-): number {
-	// Get all tasks in same file with same parent (siblings)
-	const allTasksInFile = db.getTasksForFile(filepath);
-	const siblings: number[] = [];
+// ============================================================================
+// PHASE 5 HELPER FUNCTIONS - Sequential Write-Back
+// ============================================================================
 
-	for (const [tid, task] of allTasksInFile) {
-		// Skip self
-		if (tid === taskTid) continue;
-
-		// Check if same parent
-		const taskParent = task.parent_tid || null;
-		if (taskParent === parentTid) {
-			// Sibling found - get current line number
-			const lineNum = tidToLineNum.get(tid);
-			if (lineNum !== undefined) {
-				siblings.push(lineNum);
-			}
+/**
+ * Find line number where a specific TID exists in the editor.
+ * @param tid - Task ID to find
+ * @param editor - Obsidian editor
+ * @returns Line number (0-based) or undefined if not found
+ */
+function findTaskLineByTid(tid: string, editor: Editor): number | undefined {
+	const totalLines = editor.lineCount();
+	for (let i = 0; i < totalLines; i++) {
+		const line = editor.getLine(i);
+		const lineTid = extractTID(line);
+		if (lineTid === tid) {
+			return i;
 		}
 	}
-
-	if (siblings.length > 0) {
-		// Insert after last sibling
-		siblings.sort((a, b) => a - b);
-		return siblings[siblings.length - 1] + 1;
-	}
-
-	// No siblings - insert after parent (if parent exists)
-	if (parentTid) {
-		const parentLineNum = tidToLineNum.get(parentTid);
-		if (parentLineNum !== undefined) {
-			return parentLineNum + 1;
-		}
-	}
-
-	// No siblings, no parent in file - insert at end
-	return totalLines;
+	return undefined;
 }
 
 /**
- * PHASE 5 HELPER: Build task line with specific indentation.
+ * Find line number where a specific TID exists in lines array.
+ * @param tid - Task ID to find
+ * @param lines - Array of file lines
+ * @returns Line number (0-based) or undefined if not found
+ */
+function findTaskLineByTidInLines(tid: string, lines: string[]): number | undefined {
+	for (let i = 0; i < lines.length; i++) {
+		const lineTid = extractTID(lines[i]);
+		if (lineTid === tid) {
+			return i;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Detect parent TID from indent structure in editor.
+ * Scans backward from current line to find first task with indent = current indent - 1.
+ * @param lineNum - Current line number
+ * @param editor - Obsidian editor
+ * @returns Parent TID or null if root task
+ */
+function detectParentTidFromIndent(lineNum: number, editor: Editor): string | null {
+	const currentLine = editor.getLine(lineNum);
+	const currentIndent = getIndentLevel(currentLine);
+
+	// Root task (no indent)
+	if (currentIndent === 0) {
+		return null;
+	}
+
+	// Scan backward to find parent (indent = current - 1)
+	const parentIndent = currentIndent - 1;
+	for (let i = lineNum - 1; i >= 0; i--) {
+		const line = editor.getLine(i);
+		if (!isMarkdownTask(line)) continue;
+
+		const lineIndent = getIndentLevel(line);
+		if (lineIndent === parentIndent) {
+			// Found parent - extract TID
+			return extractTID(line);
+		}
+	}
+
+	// No parent found (orphaned or malformed hierarchy)
+	return null;
+}
+
+/**
+ * Detect parent TID from indent structure in lines array.
+ * @param lineNum - Current line number
+ * @param lines - Array of file lines
+ * @returns Parent TID or null if root task
+ */
+function detectParentTidFromIndentInLines(lineNum: number, lines: string[]): string | null {
+	const currentLine = lines[lineNum];
+	const currentIndent = getIndentLevel(currentLine);
+
+	if (currentIndent === 0) {
+		return null;
+	}
+
+	const parentIndent = currentIndent - 1;
+	for (let i = lineNum - 1; i >= 0; i--) {
+		const line = lines[i];
+		if (!isMarkdownTask(line)) continue;
+
+		const lineIndent = getIndentLevel(line);
+		if (lineIndent === parentIndent) {
+			return extractTID(line);
+		}
+	}
+
+	return null;
+}
+
+/**
+ * Find line number of last root task (indent = 0) in editor.
+ * @param editor - Obsidian editor
+ * @returns Line number of last root, or -1 if no roots exist
+ */
+function findLastRootLine(editor: Editor): number {
+	let lastRootLine = -1;
+	const totalLines = editor.lineCount();
+
+	for (let i = 0; i < totalLines; i++) {
+		const line = editor.getLine(i);
+		if (!isMarkdownTask(line)) continue;
+
+		const indent = getIndentLevel(line);
+		if (indent === 0) {
+			lastRootLine = i;
+		}
+	}
+
+	return lastRootLine;
+}
+
+/**
+ * Find line number of last root task in lines array.
+ * @param lines - Array of file lines
+ * @returns Line number of last root, or -1 if no roots exist
+ */
+function findLastRootLineInLines(lines: string[]): number {
+	let lastRootLine = -1;
+
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		if (!isMarkdownTask(line)) continue;
+
+		const indent = getIndentLevel(line);
+		if (indent === 0) {
+			lastRootLine = i;
+		}
+	}
+
+	return lastRootLine;
+}
+
+/**
+ * Find line number of last direct child of a parent task in editor.
+ * Only returns direct children (parent indent + 1), not grandchildren.
+ * @param parentTid - Parent task ID
+ * @param editor - Obsidian editor
+ * @returns Line number of last child, or null if no children exist
+ */
+function findLastChildLine(parentTid: string, editor: Editor): number | null {
+	// Find parent line first
+	const parentLine = findTaskLineByTid(parentTid, editor);
+	if (parentLine === undefined) {
+		return null;
+	}
+
+	const parentIndent = getIndentLevel(editor.getLine(parentLine));
+	const childIndent = parentIndent + 1;
+	let lastChildLine: number | null = null;
+	const totalLines = editor.lineCount();
+
+	// Scan forward from parent to find children
+	for (let i = parentLine + 1; i < totalLines; i++) {
+		const line = editor.getLine(i);
+		if (!isMarkdownTask(line)) continue;
+
+		const lineIndent = getIndentLevel(line);
+
+		// Stop if we hit a task with same or less indent than parent (end of parent's subtree)
+		if (lineIndent <= parentIndent) {
+			break;
+		}
+
+		// Track direct children only (indent = parent + 1)
+		if (lineIndent === childIndent) {
+			lastChildLine = i;
+		}
+	}
+
+	return lastChildLine;
+}
+
+/**
+ * Find line number of last direct child of a parent task in lines array.
+ * @param parentTid - Parent task ID
+ * @param lines - Array of file lines
+ * @returns Line number of last child, or null if no children exist
+ */
+function findLastChildLineInLines(parentTid: string, lines: string[]): number | null {
+	const parentLine = findTaskLineByTidInLines(parentTid, lines);
+	if (parentLine === undefined) {
+		return null;
+	}
+
+	const parentIndent = getIndentLevel(lines[parentLine]);
+	const childIndent = parentIndent + 1;
+	let lastChildLine: number | null = null;
+
+	for (let i = parentLine + 1; i < lines.length; i++) {
+		const line = lines[i];
+		if (!isMarkdownTask(line)) continue;
+
+		const lineIndent = getIndentLevel(line);
+
+		if (lineIndent <= parentIndent) {
+			break;
+		}
+
+		if (lineIndent === childIndent) {
+			lastChildLine = i;
+		}
+	}
+
+	return lastChildLine;
+}
+
+// ============================================================================
+// SHARED HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Build task line with specific indentation.
  * Strips existing indent, adds new indent based on hierarchy.
  *
  * @param taskData - Task data to build line from
  * @param frontmatterLabels - Labels from frontmatter (excluded from inline)
  * @param indent - Indent level (0 = root, 1 = child, etc.)
+ * @param indentUnit - Indent unit from Obsidian settings
  * @returns Task line with correct indentation
  */
 function buildTaskLineWithIndent(
@@ -966,293 +1075,221 @@ async function resolveAndApplyUpdates(
 	// Use vault.process() for background files (atomic)
 	if (fileUpdates.length > 0) {
 		if (editor) {
-			// Active file: Use editor.transaction() for atomic batch updates
-			console.log(`Applying ${fileUpdates.length} file updates using Editor API (active file)`);
+			// Active file: Use sequential level-by-level processing
+			// Inspired by Phase 2's proven creation pattern
+			console.log(`Applying ${fileUpdates.length} file updates using Editor API (active file, sequential mode)`);
 
-			// Step 1: Build TID → line number map (one scan for efficiency)
-			const tidToLineNum = new Map<string, number>();
-			const totalLines = editor.lineCount();
-			const fileLines: string[] = [];
-
-			for (let lineNum = 0; lineNum < totalLines; lineNum++) {
-				const line = editor.getLine(lineNum);
-				fileLines.push(line);
-				const tid = extractTID(line);
-				if (tid) {
-					tidToLineNum.set(tid, lineNum);
-				}
-			}
-
-			console.log(`Built TID map with ${tidToLineNum.size} tasks`);
-
-			// Step 2: Split updates into in-place and reposition groups
-			const inPlaceUpdates: typeof fileUpdates = [];
-			const repositionUpdates: typeof fileUpdates = [];
+			// Step 1: Group updates by depth level (dependency order)
+			const updatesByLevel = new Map<number, typeof fileUpdates>();
+			let maxLevel = 0;
 
 			for (const update of fileUpdates) {
-				if (update.needsReposition) {
-					repositionUpdates.push(update);
-				} else {
-					inPlaceUpdates.push(update);
+				const depth = calculateTaskDepth(update.tid, db);
+				if (!updatesByLevel.has(depth)) {
+					updatesByLevel.set(depth, []);
+				}
+				updatesByLevel.get(depth)!.push(update);
+				maxLevel = Math.max(maxLevel, depth);
+			}
+
+			console.log(`Grouped updates into ${updatesByLevel.size} levels (max depth: ${maxLevel})`);
+
+			// Step 2: Process each level sequentially (roots first, then children, etc.)
+			for (let level = 0; level <= maxLevel; level++) {
+				const levelUpdates = updatesByLevel.get(level);
+				if (!levelUpdates || levelUpdates.length === 0) continue;
+
+				console.log(`Processing level ${level}: ${levelUpdates.length} tasks`);
+
+				// Step 3: Process each task in this level ONE AT A TIME
+				for (const update of levelUpdates) {
+					// Find current line (file state may have changed from previous tasks!)
+					const currentLine = findTaskLineByTid(update.tid, editor);
+					if (currentLine === undefined) {
+						console.warn(`  Task ${update.tid} not found in file, skipping`);
+						continue;
+					}
+
+					// Get task from DB to know expected parent
+					const task = db.getTask(update.tid);
+					if (!task) {
+						console.warn(`  Task ${update.tid} not in DB, skipping`);
+						continue;
+					}
+
+					// Determine expected and actual parents
+					const expectedParent = task.parent_tid || null;
+					const actualParent = detectParentTidFromIndent(currentLine, editor);
+
+					// Calculate correct indent level (= depth from DB)
+					const correctIndent = calculateTaskDepth(update.tid, db);
+
+					// Parse current line to get task data
+					const taskData = parseTaskLine(editor.getLine(currentLine));
+					if (!taskData) {
+						console.warn(`  Failed to parse task ${update.tid}, skipping`);
+						continue;
+					}
+
+					// Ensure TID is set
+					taskData.tid = update.tid;
+
+					// Build new line content with correct indentation
+					const newLineContent = buildTaskLineWithIndent(taskData, [], correctIndent, indentUnit);
+
+					// Decision: Update in-place OR delete+insert?
+					if (expectedParent === actualParent && !update.needsReposition) {
+						// Correct parent and no repositioning needed - update in-place
+						editor.setLine(currentLine, newLineContent);
+						console.log(`  ✓ Updated ${update.tid} in-place at line ${currentLine} (indent=${correctIndent})`);
+
+					} else {
+						// Wrong parent or needs repositioning - delete + insert
+						const currentContent = editor.getLine(currentLine);
+
+						// Delete current line
+						editor.replaceRange(
+							'',
+							{ line: currentLine, ch: 0 },
+							{ line: currentLine + 1, ch: 0 }
+						);
+
+						// Find insert position
+						let insertPos: number;
+						if (expectedParent === null) {
+							// Task should be root - insert after last root
+							const lastRoot = findLastRootLine(editor);
+							insertPos = lastRoot + 1;
+						} else {
+							// Task should be child - insert after last child of parent
+							const lastChild = findLastChildLine(expectedParent, editor);
+							if (lastChild !== null) {
+								insertPos = lastChild + 1;
+							} else {
+								// No children yet - insert right after parent
+								const parentLine = findTaskLineByTid(expectedParent, editor);
+								insertPos = parentLine !== undefined ? parentLine + 1 : editor.lineCount();
+							}
+						}
+
+						// Insert at new position
+						editor.replaceRange(
+							newLineContent + '\n',
+							{ line: insertPos, ch: 0 },
+							{ line: insertPos, ch: 0 }
+						);
+
+						console.log(`  ✓ Moved ${update.tid} from line ${currentLine} → ${insertPos} (indent=${correctIndent}, parent=${expectedParent || 'root'})`);
+					}
 				}
 			}
 
-			console.log(`In-place updates: ${inPlaceUpdates.length}, Repositions: ${repositionUpdates.length}`);
-
-			// Step 3: Build EditorChanges array
-			const changes: EditorChange[] = [];
-
-			// Process in-place updates (content replacement with indentation preservation)
-			for (const update of inPlaceUpdates) {
-				const currentLineNum = tidToLineNum.get(update.tid);
-				if (currentLineNum === undefined) {
-					console.warn(`Task ${update.tid} not found in file for in-place update`);
-					continue;
-				}
-
-				const currentLine = fileLines[currentLineNum];
-
-				// CRITICAL: Preserve current line's indentation
-				const currentIndent = getIndentLevel(currentLine);
-				const indentedNewContent = currentIndent > 0
-					? buildIndent(currentIndent, indentUnit) + update.newContent.replace(/^[\s]*/, '')
-					: update.newContent;
-
-				if (indentedNewContent !== currentLine) {
-					changes.push({
-						from: { line: currentLineNum, ch: 0 },
-						to: { line: currentLineNum, ch: currentLine.length },
-						text: indentedNewContent
-					});
-					console.log(`  In-place update queued for ${update.tid} at line ${currentLineNum} (indent: ${currentIndent})`);
-				}
-			}
-
-			// Process repositioning updates (delete old line + insert at new position)
-			const repositionChanges: Array<{
-				tid: string;
-				oldLine: number;
-				newLine: number;
-				content: string;
-			}> = [];
-
-			// BUG FIX #7: Sort by depth (parent-first) to avoid stale position lookups
-			// Calculate depth for each task and sort before processing
-			const repositionWithDepth = repositionUpdates.map(update => ({
-				update,
-				depth: calculateTaskDepth(update.tid, db)
-			}));
-			repositionWithDepth.sort((a, b) => a.depth - b.depth);  // Process roots first (depth 0), then children (depth 1), etc.
-
-			// BUG FIX #7: Create working copy of tidToLineNum that we update as we calculate positions
-			// This way children see their parents' NEW positions, not stale ones!
-			const workingTidToLineNum = new Map(tidToLineNum);
-
-			for (const {update, depth} of repositionWithDepth) {
-				const currentLineNum = tidToLineNum.get(update.tid);  // Original position
-				if (currentLineNum === undefined) {
-					console.warn(`Task ${update.tid} not found in file for repositioning`);
-					continue;
-				}
-
-				// Get task from DB for parent info
-				const task = db.getTask(update.tid);
-				if (!task) {
-					console.warn(`Task ${update.tid} not in DB, skipping reposition`);
-					continue;
-				}
-
-				// Calculate indent from parent chain (uses workingTidToLineNum for updated positions)
-				const indent = calculateIndentFromParentChain(update.tid, db, workingTidToLineNum, fileLines);
-
-				// Parse task data to rebuild with correct indent
-				const taskData = parseTaskLine(fileLines[currentLineNum]);
-				if (!taskData) {
-					console.warn(`Failed to parse task ${update.tid} for repositioning`);
-					continue;
-				}
-
-				// Build new line with calculated indent
-				taskData.tid = update.tid;  // Ensure TID is set
-				const newLineContent = buildTaskLineWithIndent(taskData, [], indent, indentUnit);
-
-				// Find insert position (after last sibling or after parent)
-				// CRITICAL: Use workingTidToLineNum so we see updated positions from earlier tasks!
-				const insertPos = findSiblingInsertPosition(
-					update.tid,
-					task.parent_tid || null,
-					file.path,
-					db,
-					workingTidToLineNum,  // ← Use WORKING map with updated positions!
-					totalLines
-				);
-
-				// Clamp insert position to valid range
-				const clampedInsertPos = Math.min(insertPos, totalLines);
-
-				// Check if repositioning is actually needed
-				if (currentLineNum === clampedInsertPos && newLineContent === fileLines[currentLineNum]) {
-					console.log(`  Task ${update.tid} already at correct position ${currentLineNum}, skipping`);
-					continue;
-				}
-
-				repositionChanges.push({
-					tid: update.tid,
-					oldLine: currentLineNum,
-					newLine: clampedInsertPos,
-					content: newLineContent
-				});
-
-				// BUG FIX #7: Update working map with new position for next tasks to see!
-				workingTidToLineNum.set(update.tid, clampedInsertPos);
-
-				console.log(`  Reposition queued: ${update.tid} from line ${currentLineNum} → ${clampedInsertPos} (indent=${indent}, depth=${depth})`);
-			}
-
-			// Step 4: Build EditorChanges for repositioning
-			// Process repositions: delete old line, insert at new position
-			// Sort by line number descending to avoid line number invalidation
-			repositionChanges.sort((a, b) => b.oldLine - a.oldLine);
-
-			for (const reposition of repositionChanges) {
-				// Delete old line
-				changes.push({
-					from: { line: reposition.oldLine, ch: 0 },
-					to: { line: reposition.oldLine + 1, ch: 0 },  // Include newline
-					text: ''
-				});
-
-				// Insert at new position
-				// CRITICAL: editor.transaction() applies ALL changes to ORIGINAL document state
-				// No adjustment needed - all positions reference the original line numbers
-				changes.push({
-					from: { line: reposition.newLine, ch: 0 },
-					to: { line: reposition.newLine, ch: 0 },
-					text: reposition.content + '\n'
-				});
-			}
-
-			// Step 5: Apply all changes atomically
-			if (changes.length > 0) {
-				console.log(`Applying ${changes.length} changes atomically via editor.transaction()`);
-				editor.transaction({ changes });
-				console.log(`✓ Changes applied successfully (${inPlaceUpdates.length} in-place, ${repositionChanges.length} repositioned)`);
-			} else {
-				console.log(`No changes to apply`);
-			}
+			console.log(`✓ All updates applied successfully (${fileUpdates.length} tasks processed sequentially)`);
 
 		} else {
-			// Background file: Use vault.process()
-			console.log(`Applying ${fileUpdates.length} file updates using Vault API (background file)`);
+			// Background file: Use sequential level-by-level processing with vault.process()
+			console.log(`Applying ${fileUpdates.length} file updates using Vault API (background file, sequential mode)`);
 
 			await vault.process(file, (content) => {
-				const lines = content.split('\n');
+				let lines = content.split('\n');
 
-				// Build TID → line number map
-				const tidToLineNum = new Map<string, number>();
-				for (let i = 0; i < lines.length; i++) {
-					const tid = extractTID(lines[i]);
-					if (tid) {
-						tidToLineNum.set(tid, i);
-					}
-				}
-
-				// Split updates
-				const inPlaceUpdates: typeof fileUpdates = [];
-				const repositionUpdates: typeof fileUpdates = [];
+				// Step 1: Group updates by depth level (dependency order)
+				const updatesByLevel = new Map<number, typeof fileUpdates>();
+				let maxLevel = 0;
 
 				for (const update of fileUpdates) {
-					if (update.needsReposition) {
-						repositionUpdates.push(update);
-					} else {
-						inPlaceUpdates.push(update);
+					const depth = calculateTaskDepth(update.tid, db);
+					if (!updatesByLevel.has(depth)) {
+						updatesByLevel.set(depth, []);
+					}
+					updatesByLevel.get(depth)!.push(update);
+					maxLevel = Math.max(maxLevel, depth);
+				}
+
+				console.log(`Grouped updates into ${updatesByLevel.size} levels (max depth: ${maxLevel})`);
+
+				// Step 2: Process each level sequentially (roots first, then children, etc.)
+				for (let level = 0; level <= maxLevel; level++) {
+					const levelUpdates = updatesByLevel.get(level);
+					if (!levelUpdates || levelUpdates.length === 0) continue;
+
+					console.log(`Processing level ${level}: ${levelUpdates.length} tasks`);
+
+					// Step 3: Process each task in this level ONE AT A TIME
+					for (const update of levelUpdates) {
+						// Find current line (array may have changed from previous tasks!)
+						const currentLine = findTaskLineByTidInLines(update.tid, lines);
+						if (currentLine === undefined) {
+							console.warn(`  Task ${update.tid} not found in file, skipping`);
+							continue;
+						}
+
+						// Get task from DB to know expected parent
+						const task = db.getTask(update.tid);
+						if (!task) {
+							console.warn(`  Task ${update.tid} not in DB, skipping`);
+							continue;
+						}
+
+						// Determine expected and actual parents
+						const expectedParent = task.parent_tid || null;
+						const actualParent = detectParentTidFromIndentInLines(currentLine, lines);
+
+						// Calculate correct indent level (= depth from DB)
+						const correctIndent = calculateTaskDepth(update.tid, db);
+
+						// Parse current line to get task data
+						const taskData = parseTaskLine(lines[currentLine]);
+						if (!taskData) {
+							console.warn(`  Failed to parse task ${update.tid}, skipping`);
+							continue;
+						}
+
+						// Ensure TID is set
+						taskData.tid = update.tid;
+
+						// Build new line content with correct indentation
+						const newLineContent = buildTaskLineWithIndent(taskData, [], correctIndent, indentUnit);
+
+						// Decision: Update in-place OR delete+insert?
+						if (expectedParent === actualParent && !update.needsReposition) {
+							// Correct parent and no repositioning needed - update in-place
+							lines[currentLine] = newLineContent;
+							console.log(`  ✓ Updated ${update.tid} in-place at line ${currentLine} (indent=${correctIndent})`);
+
+						} else {
+							// Wrong parent or needs repositioning - delete + insert
+
+							// Delete current line
+							lines.splice(currentLine, 1);
+
+							// Find insert position (after deletion, so indices may have shifted)
+							let insertPos: number;
+							if (expectedParent === null) {
+								// Task should be root - insert after last root
+								const lastRoot = findLastRootLineInLines(lines);
+								insertPos = lastRoot + 1;
+							} else {
+								// Task should be child - insert after last child of parent
+								const lastChild = findLastChildLineInLines(expectedParent, lines);
+								if (lastChild !== null) {
+									insertPos = lastChild + 1;
+								} else {
+									// No children yet - insert right after parent
+									const parentLine = findTaskLineByTidInLines(expectedParent, lines);
+									insertPos = parentLine !== undefined ? parentLine + 1 : lines.length;
+								}
+							}
+
+							// Insert at new position
+							lines.splice(insertPos, 0, newLineContent);
+
+							console.log(`  ✓ Moved ${update.tid} from line ${currentLine} → ${insertPos} (indent=${correctIndent}, parent=${expectedParent || 'root'})`);
+						}
 					}
 				}
 
-				// Process in-place updates (preserve indentation)
-				for (const update of inPlaceUpdates) {
-					const lineNum = tidToLineNum.get(update.tid);
-					if (lineNum !== undefined) {
-						// CRITICAL: Preserve current line's indentation
-						const currentLine = lines[lineNum];
-						const currentIndent = getIndentLevel(currentLine);
-						const indentedNewContent = currentIndent > 0
-							? buildIndent(currentIndent, indentUnit) + update.newContent.replace(/^[\s]*/, '')
-							: update.newContent;
-						lines[lineNum] = indentedNewContent;
-					}
-				}
-
-				// Process repositions (mark for deletion, collect inserts)
-				const linesToDelete = new Set<number>();
-				const inserts: Array<{ position: number; content: string }> = [];
-
-				// BUG FIX #7: Sort by depth (parent-first) and use working copy (same as editor path)
-				const repositionWithDepth = repositionUpdates.map(update => ({
-					update,
-					depth: calculateTaskDepth(update.tid, db)
-				}));
-				repositionWithDepth.sort((a, b) => a.depth - b.depth);
-
-				// Create working copy of tidToLineNum for dynamic updates
-				const workingTidToLineNum = new Map(tidToLineNum);
-
-				for (const {update, depth} of repositionWithDepth) {
-					const currentLineNum = tidToLineNum.get(update.tid);  // Original position
-					if (currentLineNum === undefined) continue;
-
-					const task = db.getTask(update.tid);
-					if (!task) continue;
-
-					// Calculate indent (uses workingTidToLineNum)
-					const indent = calculateIndentFromParentChain(update.tid, db, workingTidToLineNum, lines);
-
-					// Parse and rebuild with indent
-					const taskData = parseTaskLine(lines[currentLineNum]);
-					if (!taskData) continue;
-
-					taskData.tid = update.tid;
-					const newLineContent = buildTaskLineWithIndent(taskData, [], indent, indentUnit);
-
-					// Find insert position (uses workingTidToLineNum)
-					const insertPos = findSiblingInsertPosition(
-						update.tid,
-						task.parent_tid || null,
-						file.path,
-						db,
-						workingTidToLineNum,  // ← Use WORKING map!
-						lines.length
-					);
-
-					const clampedInsertPos = Math.min(insertPos, lines.length);
-
-					// Mark old line for deletion, queue insert
-					linesToDelete.add(currentLineNum);
-					inserts.push({ position: clampedInsertPos, content: newLineContent });
-
-					// Update working map with new position
-					workingTidToLineNum.set(update.tid, clampedInsertPos);
-				}
-
-				// Delete marked lines (from end to start to maintain indices)
-				const deleteIndices = Array.from(linesToDelete).sort((a, b) => b - a);
-				for (const idx of deleteIndices) {
-					lines.splice(idx, 1);
-				}
-
-				// Insert new lines with adjusted positions (account for deletions)
-				// For each insert position, count how many deleted lines are before it
-				inserts.sort((a, b) => b.position - a.position);
-				for (const insert of inserts) {
-					// Count deletions before this insert position
-					const deletionsBefore = Array.from(linesToDelete).filter(delIdx => delIdx < insert.position).length;
-
-					// Adjust position: subtract deletions that occurred before this position
-					const adjustedPos = Math.max(0, Math.min(insert.position - deletionsBefore, lines.length));
-
-					lines.splice(adjustedPos, 0, insert.content);
-				}
-
+				console.log(`✓ All updates applied successfully (${fileUpdates.length} tasks processed sequentially)`);
 				return lines.join('\n');
 			});
 		}
