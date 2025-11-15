@@ -5,9 +5,9 @@ import { TFile, Vault, MetadataCache, Workspace, MarkdownView, Editor, Notice, E
 import { v4 as uuidv4 } from 'uuid';
 import { Database } from './database';
 import { SyncSettings, TaskData, TaskInDB } from './types';
-import { isMarkdownTask, extractTID, nextFrame } from './utils';
+import { isMarkdownTask, extractTID, nextFrame, getIndentLevel, buildIndent, getIndentUnit } from './utils';
 import { parseTaskLine, parseTaskContent, buildTaskLine, insertTID } from './taskParser';
-import { syncBatchCreate, syncBatchUpdate, syncBatchDelete } from './todoistAPI';
+import { syncBatchCreate, syncBatchUpdate, syncBatchDelete, syncBatchMove } from './todoistAPI';
 import { resolveConflicts } from './conflictResolver';
 
 /**
@@ -50,6 +50,9 @@ export async function processFile(
 		console.log('Processing background file with Vault API');
 	}
 
+	// Get indent unit from Obsidian editor settings (tabs or spaces)
+	const indentUnit = getIndentUnit(workspace);
+
 	// Read file content
 	// Use editor.getValue() for active file (includes unflushed changes)
 	// Use vault.cachedRead() for background files
@@ -62,18 +65,96 @@ export async function processFile(
 
 	// Parse all markdown tasks in file (k-note lines 2261-2290)
 	// Process ALL tasks if frontmatter has todoist-sync: true
-	const allTasks: Array<{ lineNum: number; line: string; tid: string | null }> = [];
+	const allTasks: Array<{
+		lineNum: number;
+		line: string;
+		tid: string | null;
+		parent_tid: string | null;
+		parent_content: string | null;
+	}> = [];
 
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
 
 		if (isMarkdownTask(line)) {
 			const tid = extractTID(line);
-			allTasks.push({ lineNum: i, line, tid });
+			allTasks.push({
+				lineNum: i,
+				line,
+				tid,
+				parent_tid: null,
+				parent_content: null
+			});
 		}
 	}
 
 	console.log(`Found ${allTasks.length} tasks in file`);
+
+	// PHASE 1: Detect parent relationships using MetadataCache.listItems
+	const listItems = cache?.listItems;
+	if (listItems && listItems.length > 0) {
+		console.log(`Detecting parent relationships for ${allTasks.length} tasks...`);
+
+		// Build map: line number → ListItemCache for O(1) lookup
+		const lineToListItem = new Map(listItems.map(item => [item.position.start.line, item]));
+
+		for (const task of allTasks) {
+			const listItem = lineToListItem.get(task.lineNum);
+
+			// Skip if no ListItemCache (shouldn't happen for tasks, but be safe)
+			if (!listItem) {
+				console.warn(`No ListItemCache for task at line ${task.lineNum}`);
+				continue;
+			}
+
+			// Skip if this ListItemCache is not a task (should never happen)
+			if (listItem.task === undefined) {
+				console.warn(`ListItemCache at line ${task.lineNum} is not a task`);
+				continue;
+			}
+
+			// Check if has parent (parent >= 0 means has parent)
+			if (listItem.parent < 0) {
+				// Root level task - no parent
+				task.parent_tid = null;
+				task.parent_content = null;
+				continue;
+			}
+
+			// Has parent - get parent line
+			const parentLine = listItem.parent;
+			const parentLineText = lines[parentLine];
+
+			// Check if parent is also a task
+			if (!isMarkdownTask(parentLineText)) {
+				// Parent is regular list item (not a task) - treat child as root
+				console.log(`Task at line ${task.lineNum} has non-task parent at line ${parentLine}, treating as root`);
+				task.parent_tid = null;
+				task.parent_content = null;
+				continue;
+			}
+
+			// Parent is a task! Extract parent TID
+			const parentTid = extractTID(parentLineText);
+
+			if (parentTid) {
+				// Parent has TID - store parent_tid
+				task.parent_tid = parentTid;
+				task.parent_content = null;
+				console.log(`Task at line ${task.lineNum} has parent TID: ${parentTid}`);
+			} else {
+				// Parent has no TID (also new task) - store parent_content for later resolution
+				const parentTaskData = parseTaskLine(parentLineText);
+				if (parentTaskData) {
+					task.parent_tid = null;
+					task.parent_content = parseTaskContent(parentLineText);
+					console.log(`Task at line ${task.lineNum} has parent_content: ${task.parent_content.substring(0, 40)}`);
+				} else {
+					console.warn(`Failed to parse parent task at line ${parentLine}`);
+				}
+			}
+		}
+	}
 
 	// Separate new vs existing tasks
 	const newTasks = allTasks.filter(t => t.tid === null);
@@ -81,262 +162,550 @@ export async function processFile(
 
 	console.log(`New tasks: ${newTasks.length}, Existing tasks: ${existingTasks.length}`);
 
-	// COMPREHENSIVE TASK RECONCILIATION
-	// Handles File→DB and DB→File, detects moves/deletions/changes, queues moved files
-	await reconcileFileTasks(file, existingTasks, vault, metadataCache, db, files, queuedPaths);
-
-	// Resolve all pending changes for this file (conflicts, API updates, file write-back)
-	await resolveAndApplyUpdates(file, vault, editor, db, settings);
-
-	// Process new tasks (create on Todoist API, write TIDs back)
+	// PHASE 2: Process new tasks FIRST (create on Todoist API, write TIDs back, build contentToTid map)
+	let contentToTid: Map<string, string>;
 	if (newTasks.length > 0) {
-		await processNewTasks(file, newTasks, vault, editor, db, settings, frontmatterLabels);
+		contentToTid = await processNewTasks(file, newTasks, vault, editor, db, settings, frontmatterLabels, indentUnit);
+	} else {
+		contentToTid = new Map();
 	}
+
+	// PHASE 3: Reconcile existing tasks (detect parent_tid changes, use contentToTid map)
+	// Handles File→DB and DB→File, detects moves/deletions/changes, queues moved files
+	// Pass newly created TIDs to prevent false deletion detection
+	const newlyCreatedTIDs = new Set(contentToTid.values());
+	await reconcileFileTasks(file, existingTasks, contentToTid, newlyCreatedTIDs, vault, metadataCache, db, files, queuedPaths);
+
+	// PHASE 4 & 5: Resolve all pending changes for this file (conflicts, cross-file validation, API updates, file write-back)
+	await resolveAndApplyUpdates(file, vault, editor, db, settings, indentUnit);
 
 	console.log(`Finished processing file: ${file.path}`);
 }
 
 /**
  * Process new tasks: batch create on API, write TIDs back to file.
+ * PHASE 2: Level-by-level creation with parent support.
  * Uses full content match to find tasks after API creation.
  * k-note lines 2297-2357, 2640-2661
  *
  * @param file - File containing new tasks
- * @param newTasks - Array of new tasks (no TID)
+ * @param newTasks - Array of new tasks (no TID, with parent info)
  * @param vault - Obsidian vault
  * @param editor - Editor (if active file), null otherwise
  * @param db - Database instance
  * @param settings - Plugin settings
  * @param frontmatterLabels - Labels from file frontmatter
+ * @returns contentToTid map for Phase 3 parent resolution
  */
 async function processNewTasks(
 	file: TFile,
-	newTasks: Array<{ lineNum: number; line: string; tid: string | null }>,
+	newTasks: Array<{
+		lineNum: number;
+		line: string;
+		tid: string | null;
+		parent_tid: string | null;
+		parent_content: string | null;
+	}>,
 	vault: Vault,
 	editor: Editor | null,
 	db: Database,
 	settings: SyncSettings,
-	frontmatterLabels: string[]
-): Promise<void> {
-	console.log(`Processing ${newTasks.length} new tasks...`);
+	frontmatterLabels: string[],
+	indentUnit: string
+): Promise<Map<string, string>> {
+	console.log(`Processing ${newTasks.length} new tasks with level-by-level creation...`);
 
-	// Step 1: Build commands array with temp_id (preserve order!)
-	const commands = newTasks.map((task, index) => {
-		const taskData = parseTaskLine(task.line);
-		if (!taskData) {
-			console.error(`Failed to parse task line: ${task.line}`);
-			return null;
-		}
+	// PHASE 2: Calculate levels and group by level
+	const contentToTid = new Map<string, string>();  // Maps content → TID for parent resolution
 
-		return {
-			temp_id: `new-${index}`,  // Preserve order!
-			content: taskData.content,
-			labels: [...new Set(['tdsync', ...frontmatterLabels, ...taskData.labels])],
-			project_id: settings.defaultProjectId,
-			due_date: taskData.dueDate,
-			due_datetime: taskData.dueDatetime,
-			priority: taskData.priority,
-			duration: taskData.duration
-		};
-	}).filter(cmd => cmd !== null);
-
-	if (commands.length === 0) {
-		console.warn('No valid tasks to create');
-		return;
+	if (newTasks.length === 0) {
+		return contentToTid;
 	}
 
-	// Step 2: Batch create on Todoist API
-	try {
-		const response = await syncBatchCreate(
-			settings.todoistAPIToken,
-			commands as any[]  // Type assertion (we filtered nulls)
-		);
+	// Step 1: Calculate level for each task
+	interface TaskWithLevel {
+		task: typeof newTasks[number];
+		level: number;
+	}
 
-		console.log(`Created ${Object.keys(response.temp_id_mapping).length} tasks on Todoist`);
+	const tasksWithLevels: TaskWithLevel[] = [];
 
-		// Update sync token
-		settings.syncToken = response.sync_token;
+	for (const task of newTasks) {
+		let level = 0;
 
-		// Step 3: Write TIDs back to file
-		// Use editor.processLines() for active files (preserves cursor)
-		// Use vault.process() for background files (atomic)
-		//
-		// KNOWN LIMITATION: Content-based matching
-		// If user has duplicate task content (two tasks with identical text),
-		// only the first occurrence will receive a TID. The second task will
-		// fail content match (first task now has TID) and be deleted from API.
-		// This is an acceptable edge case - duplicate content is rare and
-		// deduplication may even be desired behavior.
-		if (editor) {
-			// Active file: Use editor.transaction() for atomic TID insertion
-			console.log('Writing TIDs using Editor API (active file)');
+		// If has parent_tid (existing task as parent), level = 1
+		if (task.parent_tid) {
+			level = 1;  // Simplified: all existing-parent children are level 1
+		}
+		// If has parent_content (new task as parent), calculate level recursively
+		else if (task.parent_content) {
+			// Find parent in newTasks by matching content
+			const parentTask = newTasks.find(t => {
+				const tContent = parseTaskContent(t.line);
+				return tContent === task.parent_content && t.lineNum < task.lineNum;
+			});
 
-			// Build changes array by iterating through file
-			const changes: EditorChange[] = [];
-			const writtenTIDs = new Set<string>();
-			const totalLines = editor.lineCount();
+			if (parentTask) {
+				// Parent found - need to calculate parent's level first
+				// Use iterative approach to avoid recursion
+				const parentLevel = calculateTaskLevel(parentTask, newTasks);
+				level = parentLevel + 1;
+			} else {
+				// Parent not found - ERROR, treat as root
+				console.error(`Parent content not found for task at line ${task.lineNum}: "${task.parent_content?.substring(0, 40)}"`);
+				level = 0;
+			}
+		}
+		// No parent - root level
+		else {
+			level = 0;
+		}
 
-			console.log(`Scanning ${totalLines} lines to write ${newTasks.length} TIDs...`);
+		tasksWithLevels.push({ task, level });
+	}
 
-			// Match tasks by content (without TID) since line might have changed
-			for (let lineNum = 0; lineNum < totalLines; lineNum++) {
-				const line = editor.getLine(lineNum);
+	// Helper function to calculate task level iteratively
+	function calculateTaskLevel(
+		targetTask: typeof newTasks[number],
+		allNewTasks: typeof newTasks
+	): number {
+		const visited = new Set<number>();
+		let current = targetTask;
+		let level = 0;
+
+		while (current.parent_content) {
+			// Circular reference detection
+			if (visited.has(current.lineNum)) {
+				console.error(`Circular reference detected at line ${current.lineNum}`);
+				return 0;
+			}
+			visited.add(current.lineNum);
+
+			// Find parent
+			const parent = allNewTasks.find(t => {
+				const tContent = parseTaskContent(t.line);
+				return tContent === current.parent_content && t.lineNum < current.lineNum;
+			});
+
+			if (!parent) break;
+
+			level++;
+			current = parent;
+		}
+
+		// Add 1 more if final parent has parent_tid (existing task)
+		if (current.parent_tid) {
+			level++;
+		}
+
+		return level;
+	}
+
+	// Step 2: Group by level
+	const tasksByLevel = new Map<number, TaskWithLevel[]>();
+	for (const twl of tasksWithLevels) {
+		if (!tasksByLevel.has(twl.level)) {
+			tasksByLevel.set(twl.level, []);
+		}
+		tasksByLevel.get(twl.level)!.push(twl);
+	}
+
+	const maxLevel = Math.max(...tasksByLevel.keys());
+	console.log(`Task levels: ${Array.from(tasksByLevel.keys()).sort((a, b) => a - b).join(', ')} (max: ${maxLevel})`);
+
+	// Step 3: Process level-by-level (0, 1, 2, ...)
+	for (let level = 0; level <= maxLevel; level++) {
+		const levelTasks = tasksByLevel.get(level);
+		if (!levelTasks || levelTasks.length === 0) continue;
+
+		console.log(`Creating ${levelTasks.length} tasks at level ${level}...`);
+
+		// Build commands for this level
+		const commands = levelTasks.map((twl, index) => {
+			const taskData = parseTaskLine(twl.task.line);
+			if (!taskData) {
+				console.error(`Failed to parse task line: ${twl.task.line}`);
+				return null;
+			}
+
+			// Resolve parent_id for non-root tasks
+			let parent_id: string | undefined = undefined;
+
+			if (twl.task.parent_tid) {
+				// Parent is existing task - use TID directly
+				parent_id = twl.task.parent_tid;
+			} else if (twl.task.parent_content) {
+				// Parent is new task - look up in contentToTid map
+				const resolvedParentTid = contentToTid.get(twl.task.parent_content);
+				if (resolvedParentTid) {
+					parent_id = resolvedParentTid;
+				} else {
+					// Parent not in map - creation must have failed
+					console.error(`Parent task creation failed for content: "${twl.task.parent_content.substring(0, 40)}", creating child as root`);
+					parent_id = undefined;  // Create as root (graceful fallback)
+				}
+			}
+
+			return {
+				temp_id: `level${level}-${index}`,
+				content: taskData.content,
+				labels: [...new Set(['tdsync', ...frontmatterLabels, ...taskData.labels])],
+				project_id: settings.defaultProjectId,
+				parent_id,  // NEW: Parent support
+				due_date: taskData.dueDate,
+				due_datetime: taskData.dueDatetime,
+				priority: taskData.priority,
+				duration: taskData.duration
+			};
+		}).filter(cmd => cmd !== null);
+
+		if (commands.length === 0) {
+			console.warn(`No valid tasks to create at level ${level}`);
+			continue;
+		}
+
+		// Batch create for this level
+		try {
+			const response = await syncBatchCreate(
+				settings.todoistAPIToken,
+				commands as any[]
+			);
+
+			console.log(`Created ${Object.keys(response.temp_id_mapping).length} tasks at level ${level}`);
+
+			// Update sync token
+			settings.syncToken = response.sync_token;
+
+			// Store in contentToTid map for next levels
+			for (let i = 0; i < levelTasks.length; i++) {
+				const tempId = `level${level}-${i}`;
+				const realTID = response.temp_id_mapping[tempId];
+
+				if (realTID) {
+					const taskContent = parseTaskContent(levelTasks[i].task.line);
+					contentToTid.set(taskContent, realTID);
+					console.log(`Mapped content → TID: "${taskContent.substring(0, 40)}" → ${realTID}`);
+				} else {
+					console.error(`No TID mapping for temp_id: ${tempId}`);
+				}
+			}
+
+		} catch (error) {
+			console.error(`Failed to create tasks at level ${level}:`, error);
+			new Notice(`Failed to create tasks: ${error instanceof Error ? error.message : 'Unknown error'}`);
+			throw error;
+		}
+	}
+
+	console.log(`All ${newTasks.length} new tasks created across ${maxLevel + 1} levels`);
+
+	// Step 4: Write TIDs back to file (same logic as before, but with parent support in DB)
+	console.log(`Writing TIDs back to file using contentToTid map...`);
+
+	// Write TIDs back to file using the contentToTid map from level-by-level creation
+	// Use editor.transaction() for active files (preserves cursor)
+	// Use vault.process() for background files (atomic)
+	if (editor) {
+		// Active file: Use editor.transaction() for atomic TID insertion
+		console.log('Writing TIDs using Editor API (active file)');
+
+		// Build changes array by iterating through file
+		const changes: EditorChange[] = [];
+		const writtenTIDs = new Set<string>();
+		const totalLines = editor.lineCount();
+
+		console.log(`Scanning ${totalLines} lines to write ${newTasks.length} TIDs...`);
+
+		// Match tasks by content using contentToTid map
+		for (let lineNum = 0; lineNum < totalLines; lineNum++) {
+			const line = editor.getLine(lineNum);
+
+			// Skip lines that already have TIDs
+			if (extractTID(line)) continue;
+
+			// Parse this line
+			const currentTask = parseTaskLine(line);
+			if (!currentTask) continue;
+
+			// Look up TID in contentToTid map
+			const taskContent = parseTaskContent(line);
+			const realTID = contentToTid.get(taskContent);
+
+			if (!realTID || writtenTIDs.has(realTID)) continue;
+
+			console.log(`  Line ${lineNum}: Matched content "${currentTask.content.substring(0, 40)}" → TID ${realTID}`);
+
+			// Find original task to get parent info
+			const originalTask = newTasks.find(t => parseTaskContent(t.line) === taskContent);
+			const parent_tid = originalTask?.parent_tid || null;
+
+			// Build new line with TID, preserving original indentation
+			currentTask.tid = realTID;
+			const indent = getIndentLevel(line);
+			const newLine = buildTaskLineWithIndent(currentTask, frontmatterLabels, indent, indentUnit);
+
+			// Add to DB with parent_tid
+			db.setTask(realTID, {
+				tid: realTID,
+				filepath: file.path,
+				content: currentTask.content,
+				completed: currentTask.completed,
+				dueDate: currentTask.dueDate,
+				dueTime: currentTask.dueTime,
+				dueDatetime: currentTask.dueDatetime,
+				priority: currentTask.priority,
+				duration: currentTask.duration,
+				labels: [...new Set(['tdsync', ...frontmatterLabels, ...currentTask.labels])],
+				parent_tid,  // NEW: Store parent relationship
+				lastSyncedAt: Date.now(),
+				pending_changes: []
+			});
+
+			writtenTIDs.add(realTID);
+
+			// Queue change if line content differs
+			if (newLine !== line) {
+				changes.push({
+					from: { line: lineNum, ch: 0 },
+					to: { line: lineNum, ch: line.length },
+					text: newLine
+				});
+			}
+		}
+
+		// Apply all TID changes atomically
+		if (changes.length > 0) {
+			console.log(`Applying ${changes.length} TID insertions atomically via editor.transaction()`);
+			editor.transaction({ changes });
+			console.log(`✓ TIDs written successfully`);
+		}
+
+		// Check for unmatched tasks (created on API but not found in file)
+		for (const [content, tid] of contentToTid.entries()) {
+			if (!writtenTIDs.has(tid)) {
+				console.error(`Task not found in file: content "${content.substring(0, 50)}..."`);
+				new Notice(`Task disappeared during sync - deleting from Todoist`);
+				syncBatchDelete(settings.todoistAPIToken, [tid])
+					.catch(err => console.error('Failed to delete ghost task:', err));
+			}
+		}
+
+	} else {
+		// Background file: Use vault.process()
+		console.log('Writing TIDs using Vault API (background file)');
+
+		const writtenTIDs = new Set<string>();
+
+		await vault.process(file, (currentContent) => {
+			const currentLines = currentContent.split('\n');
+
+			// Match tasks by content using contentToTid map
+			for (let lineIdx = 0; lineIdx < currentLines.length; lineIdx++) {
+				const currentLine = currentLines[lineIdx];
 
 				// Skip lines that already have TIDs
-				if (extractTID(line)) continue;
+				if (extractTID(currentLine)) continue;
 
-				// Parse this line
-				const currentTask = parseTaskLine(line);
-				if (!currentTask) continue;
+				// Parse task
+				const taskData = parseTaskLine(currentLine);
+				if (!taskData) continue;
 
-				// Try to match with newTasks by content
-				for (let i = 0; i < newTasks.length; i++) {
-					const tempId = `new-${i}`;
-					const realTID = response.temp_id_mapping[tempId];
+				// Look up TID in contentToTid map
+				const taskContent = parseTaskContent(currentLine);
+				const realTID = contentToTid.get(taskContent);
 
-					if (!realTID || writtenTIDs.has(realTID)) continue;
+				if (!realTID || writtenTIDs.has(realTID)) continue;
 
-					const originalTask = parseTaskLine(newTasks[i].line);
-					if (!originalTask) continue;
+				// Find original task to get parent info
+				const originalTask = newTasks.find(t => parseTaskContent(t.line) === taskContent);
+				const parent_tid = originalTask?.parent_tid || null;
 
-					// Match by content (user might have edited formatting)
-					if (currentTask.content === originalTask.content) {
-						console.log(`  Line ${lineNum}: Matched content "${currentTask.content.substring(0, 40)}" → TID ${realTID}`);
+				// Add TID to line, preserving original indentation
+				taskData.tid = realTID;
+				const indent = getIndentLevel(currentLine);
+				currentLines[lineIdx] = buildTaskLineWithIndent(taskData, frontmatterLabels, indent, indentUnit);
 
-						// Build new line with TID
-						currentTask.tid = realTID;
-						const newLine = buildTaskLine(currentTask, frontmatterLabels);
+				// Add to DB with parent_tid
+				db.setTask(realTID, {
+					tid: realTID,
+					filepath: file.path,
+					content: taskData.content,
+					completed: taskData.completed,
+					dueDate: taskData.dueDate,
+					dueTime: taskData.dueTime,
+					dueDatetime: taskData.dueDatetime,
+					priority: taskData.priority,
+					duration: taskData.duration,
+					labels: [...new Set(['tdsync', ...frontmatterLabels, ...taskData.labels])],
+					parent_tid,  // NEW: Store parent relationship
+					lastSyncedAt: Date.now(),
+					pending_changes: []
+				});
 
-						// Add to DB
-						db.setTask(realTID, {
-							tid: realTID,
-							filepath: file.path,
-							content: currentTask.content,
-							completed: currentTask.completed,
-							dueDate: currentTask.dueDate,
-							dueTime: currentTask.dueTime,
-							dueDatetime: currentTask.dueDatetime,
-							priority: currentTask.priority,
-							duration: currentTask.duration,
-							labels: [...new Set(['tdsync', ...frontmatterLabels, ...currentTask.labels])],
-							lastSyncedAt: Date.now(),
-							pending_changes: []
-						});
-
-						writtenTIDs.add(realTID);
-
-						// Queue change if line content differs
-						if (newLine !== line) {
-							changes.push({
-								from: { line: lineNum, ch: 0 },
-								to: { line: lineNum, ch: line.length },
-								text: newLine
-							});
-						}
-
-						break; // Found match, move to next line
-					}
-				}
+				writtenTIDs.add(realTID);
 			}
 
-			// Apply all TID changes atomically
-			if (changes.length > 0) {
-				console.log(`Applying ${changes.length} TID insertions atomically via editor.transaction()`);
-				editor.transaction({ changes });
-				console.log(`✓ TIDs written successfully`);
+			return currentLines.join('\n');
+		});
+
+		// Check for unmatched tasks (created on API but not found in file)
+		for (const [content, tid] of contentToTid.entries()) {
+			if (!writtenTIDs.has(tid)) {
+				console.error(`Task not found in file: content "${content.substring(0, 50)}..."`);
+				new Notice(`Task disappeared during sync - deleting from Todoist`);
+				syncBatchDelete(settings.todoistAPIToken, [tid])
+					.catch(err => console.error('Failed to delete ghost task:', err));
 			}
+		}
+	}
 
-			// Check for unmatched tasks
-			for (let i = 0; i < newTasks.length; i++) {
-				const tempId = `new-${i}`;
-				const realTID = response.temp_id_mapping[tempId];
-				if (realTID && !writtenTIDs.has(realTID)) {
-					console.error(`Task not found in file: ${newTasks[i].line.substring(0, 50)}...`);
-					new Notice(`Task disappeared during sync - deleting from Todoist`);
-					syncBatchDelete(settings.todoistAPIToken, [realTID])
-						.catch(err => console.error('Failed to delete ghost task:', err));
-				}
-			}
+	// Return contentToTid map for Phase 3
+	return contentToTid;
+}
 
-		} else {
-			// Background file: Use vault.process() (existing logic)
-			console.log('Writing TIDs using Vault API (background file)');
+/**
+ * PHASE 5 HELPER: Calculate indent level from parent chain.
+ * Traverses parent hierarchy in DB to determine nesting depth.
+ *
+ * @param taskTid - Task ID to calculate indent for
+ * @param db - Database instance
+ * @param tidToLineNum - Map of TID → line number (from current file scan)
+ * @param fileLines - File content split by lines
+ * @returns Indent level (0 = root, 1 = child, 2 = grandchild, etc.)
+ */
+function calculateIndentFromParentChain(
+	taskTid: string,
+	db: Database,
+	tidToLineNum: Map<string, number>,
+	fileLines: string[]
+): number {
+	const visited = new Set<string>();
+	let currentTid: string | null = taskTid;
+	let depth = 0;
+	const MAX_DEPTH = 20;  // Prevent infinite loops
 
-			await vault.process(file, (currentContent) => {
-				const currentLines = currentContent.split('\n');
+	while (currentTid && depth < MAX_DEPTH) {
+		// Circular reference detection
+		if (visited.has(currentTid)) {
+			console.error(`Circular parent reference detected for task ${taskTid}`);
+			return 0;
+		}
+		visited.add(currentTid);
 
-				// Process in ORDER (handles duplicate content!)
-				for (let i = 0; i < newTasks.length; i++) {
-					const task = newTasks[i];
-					const tempId = `new-${i}`;
-					const realTID = response.temp_id_mapping[tempId];
-
-					if (!realTID) {
-						console.error(`No TID mapping for temp_id: ${tempId}`);
-						continue;
-					}
-
-					// Find first occurrence of EXACT content (order matters!)
-					let found = false;
-					for (let lineIdx = 0; lineIdx < currentLines.length; lineIdx++) {
-						const currentLine = currentLines[lineIdx];
-
-						// Match by FULL content AND no TID yet
-						if (currentLine === task.line && extractTID(currentLine) === null) {
-							// Found it! Add TID and enforce ordering
-							const taskData = parseTaskLine(currentLine);
-							if (taskData) {
-								taskData.tid = realTID;
-								currentLines[lineIdx] = buildTaskLine(taskData, frontmatterLabels);
-
-								// Add to DB
-								db.setTask(realTID, {
-									tid: realTID,
-									filepath: file.path,
-									content: taskData.content,
-									completed: taskData.completed,
-									dueDate: taskData.dueDate,
-									dueTime: taskData.dueTime,
-									dueDatetime: taskData.dueDatetime,
-									priority: taskData.priority,
-									duration: taskData.duration,
-									labels: [...new Set(['tdsync', ...frontmatterLabels, ...taskData.labels])],
-									lastSyncedAt: Date.now(),
-									pending_changes: []
-								});
-
-								found = true;
-								break;  // Move to next task
-							}
-						}
-					}
-
-					// FALLBACK: Content changed between read and write!
-					// Delete from API to avoid ghost tasks
-					if (!found) {
-						console.error(`Task not found by full content match: ${task.line.substring(0, 50)}...`);
-						new Notice(`Task disappeared during sync - deleting from Todoist`);
-
-						// Delete from API immediately
-						syncBatchDelete(settings.todoistAPIToken, [realTID])
-							.catch(err => console.error('Failed to delete ghost task:', err));
-					}
-				}
-
-				return currentLines.join('\n');
-			});
+		// Get parent from DB
+		const task = db.getTask(currentTid);
+		if (!task || !task.parent_tid) {
+			// Reached root or task not found
+			return depth;
 		}
 
-	} catch (error) {
-		console.error('Failed to create new tasks:', error);
-		new Notice(`Failed to create tasks: ${error instanceof Error ? error.message : 'Unknown error'}`);
-		throw error;
+		// Check if parent exists in current file
+		const parentLineNum = tidToLineNum.get(task.parent_tid);
+		if (parentLineNum === undefined) {
+			// Parent not in file - can't calculate indent from it
+			console.warn(`Parent ${task.parent_tid} not found in file for task ${taskTid}, using indent=${depth}`);
+			return depth;
+		}
+
+		// Parent exists - continue up the chain
+		currentTid = task.parent_tid;
+		depth++;
 	}
+
+	if (depth >= MAX_DEPTH) {
+		console.error(`Max depth reached for task ${taskTid}, possible circular reference`);
+	}
+
+	return depth;
+}
+
+/**
+ * PHASE 5 HELPER: Find insert position for repositioned task (after last sibling).
+ * Queries DB for siblings, finds their current line numbers, returns position after last sibling.
+ *
+ * @param taskTid - Task ID being repositioned
+ * @param parentTid - Parent task ID (null for root)
+ * @param filepath - Current file path
+ * @param db - Database instance
+ * @param tidToLineNum - Map of TID → line number (from current file scan)
+ * @param totalLines - Total number of lines in file (for fallback)
+ * @returns Line number to insert at (0-based)
+ */
+function findSiblingInsertPosition(
+	taskTid: string,
+	parentTid: string | null,
+	filepath: string,
+	db: Database,
+	tidToLineNum: Map<string, number>,
+	totalLines: number
+): number {
+	// Get all tasks in same file with same parent (siblings)
+	const allTasksInFile = db.getTasksForFile(filepath);
+	const siblings: number[] = [];
+
+	for (const [tid, task] of allTasksInFile) {
+		// Skip self
+		if (tid === taskTid) continue;
+
+		// Check if same parent
+		const taskParent = task.parent_tid || null;
+		if (taskParent === parentTid) {
+			// Sibling found - get current line number
+			const lineNum = tidToLineNum.get(tid);
+			if (lineNum !== undefined) {
+				siblings.push(lineNum);
+			}
+		}
+	}
+
+	if (siblings.length > 0) {
+		// Insert after last sibling
+		siblings.sort((a, b) => a - b);
+		return siblings[siblings.length - 1] + 1;
+	}
+
+	// No siblings - insert after parent (if parent exists)
+	if (parentTid) {
+		const parentLineNum = tidToLineNum.get(parentTid);
+		if (parentLineNum !== undefined) {
+			return parentLineNum + 1;
+		}
+	}
+
+	// No siblings, no parent in file - insert at end
+	return totalLines;
+}
+
+/**
+ * PHASE 5 HELPER: Build task line with specific indentation.
+ * Strips existing indent, adds new indent based on hierarchy.
+ *
+ * @param taskData - Task data to build line from
+ * @param frontmatterLabels - Labels from frontmatter (excluded from inline)
+ * @param indent - Indent level (0 = root, 1 = child, etc.)
+ * @returns Task line with correct indentation
+ */
+function buildTaskLineWithIndent(
+	taskData: TaskData,
+	frontmatterLabels: string[],
+	indent: number,
+	indentUnit: string
+): string {
+	// Build line without indent
+	const baseLine = buildTaskLine(taskData, frontmatterLabels);
+
+	// Strip any existing indentation
+	const strippedLine = baseLine.replace(/^[\s]*/, '');
+
+	// Add new indentation using Obsidian's indent settings
+	const indentPrefix = buildIndent(indent, indentUnit);
+	return indentPrefix + strippedLine;
 }
 
 /**
  * Resolve conflicts and apply updates for all tasks with pending changes.
  * Batch updates to Todoist, then write back to Obsidian.
+ * PHASE 5: Includes smart repositioning logic for parent changes.
  *
  * @param file - File to update
  * @param vault - Obsidian vault
@@ -349,7 +718,8 @@ async function resolveAndApplyUpdates(
 	vault: Vault,
 	editor: Editor | null,
 	db: Database,
-	settings: SyncSettings
+	settings: SyncSettings,
+	indentUnit: string
 ): Promise<void> {
 	// Get all tasks with pending changes FOR THIS FILE ONLY!
 	// CRITICAL: Don't process tasks from other files - they'll be handled when those files are processed
@@ -374,7 +744,8 @@ async function resolveAndApplyUpdates(
 		duration?: number;
 	}> = [];
 
-	const fileUpdates: Array<{ tid: string; newContent: string }> = [];
+	const apiMoves: Array<{ id: string; parent_id: string | null; project_id?: string }> = [];  // NEW: Parent changes (item_move)
+	const fileUpdates: Array<{ tid: string; newContent: string; needsReposition: boolean }> = [];
 	const apiDeletions: string[] = [];  // Task IDs to delete from Todoist
 	const fileDeletions: string[] = [];  // Task IDs to delete from Obsidian
 
@@ -407,6 +778,30 @@ async function resolveAndApplyUpdates(
 			continue;  // Skip normal update logic
 		}
 
+		// PHASE 4: Cross-file parent validation
+		let resolvedParentTid = resolution.changes.parent_tid;
+		let needsReposition = false;
+
+		if (resolvedParentTid !== undefined) {
+			// Parent changed - check cross-file validity
+			if (resolvedParentTid !== null) {
+				const parentTask = db.getTask(resolvedParentTid);
+				if (parentTask && parentTask.filepath !== task.filepath) {
+					// Cross-file parent detected - detach child to root
+					console.warn(`Task ${tid} has parent ${resolvedParentTid} in different file (${parentTask.filepath}), detaching to root`);
+					resolvedParentTid = null;
+				}
+			}
+
+			// If parent_tid changed, mark for repositioning (Phase 5)
+			if (resolvedParentTid !== task.parent_tid) {
+				needsReposition = true;
+			}
+		} else {
+			// parent_tid not in resolution (unchanged) - use DB value
+			resolvedParentTid = task.parent_tid;
+		}
+
 		if (resolution.source === 'local') {
 			// Local wins - push to API
 			apiUpdates.push({
@@ -420,6 +815,19 @@ async function resolveAndApplyUpdates(
 				duration: resolution.changes.duration
 			});
 
+			// Parent changes require item_move (separate from item_update)
+			if (resolvedParentTid !== task.parent_tid) {
+				if (resolvedParentTid === null) {
+					// Moving to root - use project_id (Todoist API doesn't support parent_id: null)
+					console.log(`Moving task ${tid} to root (project_id: ${settings.defaultProjectId})`);
+					apiMoves.push({ id: tid, parent_id: null, project_id: settings.defaultProjectId });
+				} else {
+					// Moving to parent - use parent_id
+					console.log(`Moving task ${tid} to parent ${resolvedParentTid}`);
+					apiMoves.push({ id: tid, parent_id: resolvedParentTid });
+				}
+			}
+
 			// Update DB state with local changes
 			task.content = resolution.changes.content || task.content;
 			task.completed = resolution.changes.completed ?? task.completed;
@@ -428,6 +836,7 @@ async function resolveAndApplyUpdates(
 			task.priority = resolution.changes.priority;
 			task.duration = resolution.changes.duration;
 			task.labels = resolution.changes.labels || task.labels;
+			task.parent_tid = resolvedParentTid;  // NEW: Update parent
 
 		} else {
 			// API wins - update file
@@ -442,9 +851,12 @@ async function resolveAndApplyUpdates(
 				tid: tid
 			};
 
+			// CRITICAL: Build newContent WITHOUT indent - Phase 5 will add indent based on current line
+			// This is temporary content; actual indent added during file write
 			fileUpdates.push({
 				tid,
-				newContent: buildTaskLine(updatedData, [])
+				newContent: buildTaskLine(updatedData, []),  // Indentation handled in Phase 5
+				needsReposition  // Phase 5: Reposition if parent changed
 			});
 
 			// Update DB state with API changes
@@ -455,6 +867,7 @@ async function resolveAndApplyUpdates(
 			task.priority = updatedData.priority;
 			task.duration = updatedData.duration;
 			task.labels = updatedData.labels;
+			task.parent_tid = resolvedParentTid;  // NEW: Update parent
 		}
 
 		// Clear pending changes and update timestamp
@@ -472,6 +885,19 @@ async function resolveAndApplyUpdates(
 		} catch (error) {
 			console.error('Failed to push updates to API:', error);
 			new Notice(`Failed to sync to Todoist: ${error instanceof Error ? error.message : 'Unknown error'}`);
+		}
+	}
+
+	// PHASE 4: Apply parent moves (batch item_move commands)
+	if (apiMoves.length > 0) {
+		try {
+			console.log(`Pushing ${apiMoves.length} parent moves to Todoist...`);
+			const response = await syncBatchMove(settings.todoistAPIToken, apiMoves);
+			settings.syncToken = response.sync_token;
+			console.log('API parent moves successful');
+		} catch (error) {
+			console.error('Failed to move tasks on API:', error);
+			new Notice(`Failed to update task parents on Todoist: ${error instanceof Error ? error.message : 'Unknown error'}`);
 		}
 	}
 
@@ -493,7 +919,7 @@ async function resolveAndApplyUpdates(
 		await deleteTasksFromFile(file, fileDeletions, editor, vault);
 	}
 
-	// Apply file updates
+	// PHASE 5: Apply file updates (with smart repositioning)
 	// Use editor.transaction() for active files (atomic, preserves cursor)
 	// Use vault.process() for background files (atomic)
 	if (fileUpdates.length > 0) {
@@ -501,94 +927,282 @@ async function resolveAndApplyUpdates(
 			// Active file: Use editor.transaction() for atomic batch updates
 			console.log(`Applying ${fileUpdates.length} file updates using Editor API (active file)`);
 
-			// Create TID → content mapping
-			const updateMapping = new Map<string, string>();
-			for (const update of fileUpdates) {
-				console.log(`  Preparing update for ${update.tid}:`, update.newContent.substring(0, 80));
-				updateMapping.set(update.tid, update.newContent);
-			}
-
-			// Build all changes by iterating through file
-			const changes: EditorChange[] = [];
+			// Step 1: Build TID → line number map (one scan for efficiency)
+			const tidToLineNum = new Map<string, number>();
 			const totalLines = editor.lineCount();
-			console.log(`Scanning ${totalLines} lines for TIDs to update...`);
+			const fileLines: string[] = [];
 
 			for (let lineNum = 0; lineNum < totalLines; lineNum++) {
 				const line = editor.getLine(lineNum);
+				fileLines.push(line);
 				const tid = extractTID(line);
-
-				if (tid && updateMapping.has(tid)) {
-					const newContent = updateMapping.get(tid)!;
-					console.log(`  Line ${lineNum}: Found TID ${tid}`);
-					console.log(`    Old: ${line.substring(0, 60)}`);
-					console.log(`    New: ${newContent.substring(0, 60)}`);
-
-					if (newContent !== line) {
-						changes.push({
-							from: { line: lineNum, ch: 0 },
-							to: { line: lineNum, ch: line.length },
-							text: newContent
-						});
-						console.log(`    → Change queued (content differs)`);
-					} else {
-						console.log(`    → No change needed (identical)`);
-					}
+				if (tid) {
+					tidToLineNum.set(tid, lineNum);
 				}
 			}
 
-			// Apply all changes atomically
+			console.log(`Built TID map with ${tidToLineNum.size} tasks`);
+
+			// Step 2: Split updates into in-place and reposition groups
+			const inPlaceUpdates: typeof fileUpdates = [];
+			const repositionUpdates: typeof fileUpdates = [];
+
+			for (const update of fileUpdates) {
+				if (update.needsReposition) {
+					repositionUpdates.push(update);
+				} else {
+					inPlaceUpdates.push(update);
+				}
+			}
+
+			console.log(`In-place updates: ${inPlaceUpdates.length}, Repositions: ${repositionUpdates.length}`);
+
+			// Step 3: Build EditorChanges array
+			const changes: EditorChange[] = [];
+
+			// Process in-place updates (content replacement with indentation preservation)
+			for (const update of inPlaceUpdates) {
+				const currentLineNum = tidToLineNum.get(update.tid);
+				if (currentLineNum === undefined) {
+					console.warn(`Task ${update.tid} not found in file for in-place update`);
+					continue;
+				}
+
+				const currentLine = fileLines[currentLineNum];
+
+				// CRITICAL: Preserve current line's indentation
+				const currentIndent = getIndentLevel(currentLine);
+				const indentedNewContent = currentIndent > 0
+					? buildIndent(currentIndent, indentUnit) + update.newContent.replace(/^[\s]*/, '')
+					: update.newContent;
+
+				if (indentedNewContent !== currentLine) {
+					changes.push({
+						from: { line: currentLineNum, ch: 0 },
+						to: { line: currentLineNum, ch: currentLine.length },
+						text: indentedNewContent
+					});
+					console.log(`  In-place update queued for ${update.tid} at line ${currentLineNum} (indent: ${currentIndent})`);
+				}
+			}
+
+			// Process repositioning updates (delete old line + insert at new position)
+			const repositionChanges: Array<{
+				tid: string;
+				oldLine: number;
+				newLine: number;
+				content: string;
+			}> = [];
+
+			for (const update of repositionUpdates) {
+				const currentLineNum = tidToLineNum.get(update.tid);
+				if (currentLineNum === undefined) {
+					console.warn(`Task ${update.tid} not found in file for repositioning`);
+					continue;
+				}
+
+				// Get task from DB for parent info
+				const task = db.getTask(update.tid);
+				if (!task) {
+					console.warn(`Task ${update.tid} not in DB, skipping reposition`);
+					continue;
+				}
+
+				// Calculate indent from parent chain
+				const indent = calculateIndentFromParentChain(update.tid, db, tidToLineNum, fileLines);
+
+				// Parse task data to rebuild with correct indent
+				const taskData = parseTaskLine(fileLines[currentLineNum]);
+				if (!taskData) {
+					console.warn(`Failed to parse task ${update.tid} for repositioning`);
+					continue;
+				}
+
+				// Build new line with calculated indent
+				taskData.tid = update.tid;  // Ensure TID is set
+				const newLineContent = buildTaskLineWithIndent(taskData, [], indent, indentUnit);
+
+				// Find insert position (after last sibling or after parent)
+				const insertPos = findSiblingInsertPosition(
+					update.tid,
+					task.parent_tid || null,
+					file.path,
+					db,
+					tidToLineNum,
+					totalLines
+				);
+
+				// Clamp insert position to valid range
+				const clampedInsertPos = Math.min(insertPos, totalLines);
+
+				// Check if repositioning is actually needed
+				if (currentLineNum === clampedInsertPos && newLineContent === fileLines[currentLineNum]) {
+					console.log(`  Task ${update.tid} already at correct position ${currentLineNum}, skipping`);
+					continue;
+				}
+
+				repositionChanges.push({
+					tid: update.tid,
+					oldLine: currentLineNum,
+					newLine: clampedInsertPos,
+					content: newLineContent
+				});
+
+				console.log(`  Reposition queued: ${update.tid} from line ${currentLineNum} → ${clampedInsertPos} (indent=${indent})`);
+			}
+
+			// Step 4: Build EditorChanges for repositioning
+			// Process repositions: delete old line, insert at new position
+			// Sort by line number descending to avoid line number invalidation
+			repositionChanges.sort((a, b) => b.oldLine - a.oldLine);
+
+			for (const reposition of repositionChanges) {
+				// Delete old line
+				changes.push({
+					from: { line: reposition.oldLine, ch: 0 },
+					to: { line: reposition.oldLine + 1, ch: 0 },  // Include newline
+					text: ''
+				});
+
+				// Insert at new position
+				// CRITICAL: editor.transaction() applies ALL changes to ORIGINAL document state
+				// No adjustment needed - all positions reference the original line numbers
+				changes.push({
+					from: { line: reposition.newLine, ch: 0 },
+					to: { line: reposition.newLine, ch: 0 },
+					text: reposition.content + '\n'
+				});
+			}
+
+			// Step 5: Apply all changes atomically
 			if (changes.length > 0) {
 				console.log(`Applying ${changes.length} changes atomically via editor.transaction()`);
 				editor.transaction({ changes });
-				console.log(`✓ Changes applied successfully`);
+				console.log(`✓ Changes applied successfully (${inPlaceUpdates.length} in-place, ${repositionChanges.length} repositioned)`);
 			} else {
 				console.log(`No changes to apply`);
 			}
 
 		} else {
-			// Background file: Use vault.process() (existing logic, one by one)
+			// Background file: Use vault.process()
 			console.log(`Applying ${fileUpdates.length} file updates using Vault API (background file)`);
 
-			for (const update of fileUpdates) {
-				try {
-					await vault.process(file, (content) => {
-						const lines = content.split('\n');
-						const tidPattern = new RegExp(`%%\\[tid:: \\[${update.tid}\\]`);
+			await vault.process(file, (content) => {
+				const lines = content.split('\n');
 
-						// Search for task by TID in file AGAIN (might have moved)
-						for (let i = 0; i < lines.length; i++) {
-							if (tidPattern.test(lines[i])) {
-								// Found task - update it
-								lines[i] = update.newContent;
-								console.log(`Updated task ${update.tid} in file`);
-								break;
-							}
-						}
-
-						return lines.join('\n');
-					});
-				} catch (error) {
-					console.error(`Failed to update task ${update.tid} in file:`, error);
-					// Continue with next task
+				// Build TID → line number map
+				const tidToLineNum = new Map<string, number>();
+				for (let i = 0; i < lines.length; i++) {
+					const tid = extractTID(lines[i]);
+					if (tid) {
+						tidToLineNum.set(tid, i);
+					}
 				}
-			}
+
+				// Split updates
+				const inPlaceUpdates: typeof fileUpdates = [];
+				const repositionUpdates: typeof fileUpdates = [];
+
+				for (const update of fileUpdates) {
+					if (update.needsReposition) {
+						repositionUpdates.push(update);
+					} else {
+						inPlaceUpdates.push(update);
+					}
+				}
+
+				// Process in-place updates (preserve indentation)
+				for (const update of inPlaceUpdates) {
+					const lineNum = tidToLineNum.get(update.tid);
+					if (lineNum !== undefined) {
+						// CRITICAL: Preserve current line's indentation
+						const currentLine = lines[lineNum];
+						const currentIndent = getIndentLevel(currentLine);
+						const indentedNewContent = currentIndent > 0
+							? buildIndent(currentIndent, indentUnit) + update.newContent.replace(/^[\s]*/, '')
+							: update.newContent;
+						lines[lineNum] = indentedNewContent;
+					}
+				}
+
+				// Process repositions (mark for deletion, collect inserts)
+				const linesToDelete = new Set<number>();
+				const inserts: Array<{ position: number; content: string }> = [];
+
+				for (const update of repositionUpdates) {
+					const currentLineNum = tidToLineNum.get(update.tid);
+					if (currentLineNum === undefined) continue;
+
+					const task = db.getTask(update.tid);
+					if (!task) continue;
+
+					// Calculate indent
+					const indent = calculateIndentFromParentChain(update.tid, db, tidToLineNum, lines);
+
+					// Parse and rebuild with indent
+					const taskData = parseTaskLine(lines[currentLineNum]);
+					if (!taskData) continue;
+
+					taskData.tid = update.tid;
+					const newLineContent = buildTaskLineWithIndent(taskData, [], indent, indentUnit);
+
+					// Find insert position
+					const insertPos = findSiblingInsertPosition(
+						update.tid,
+						task.parent_tid || null,
+						file.path,
+						db,
+						tidToLineNum,
+						lines.length
+					);
+
+					const clampedInsertPos = Math.min(insertPos, lines.length);
+
+					// Mark old line for deletion, queue insert
+					linesToDelete.add(currentLineNum);
+					inserts.push({ position: clampedInsertPos, content: newLineContent });
+				}
+
+				// Delete marked lines (from end to start to maintain indices)
+				const deleteIndices = Array.from(linesToDelete).sort((a, b) => b - a);
+				for (const idx of deleteIndices) {
+					lines.splice(idx, 1);
+				}
+
+				// Insert new lines with adjusted positions (account for deletions)
+				// For each insert position, count how many deleted lines are before it
+				inserts.sort((a, b) => b.position - a.position);
+				for (const insert of inserts) {
+					// Count deletions before this insert position
+					const deletionsBefore = Array.from(linesToDelete).filter(delIdx => delIdx < insert.position).length;
+
+					// Adjust position: subtract deletions that occurred before this position
+					const adjustedPos = Math.max(0, Math.min(insert.position - deletionsBefore, lines.length));
+
+					lines.splice(adjustedPos, 0, insert.content);
+				}
+
+				return lines.join('\n');
+			});
 		}
 	}
 }
 
 /**
  * Comprehensive task reconciliation: File ↔ DB bidirectional sync.
- * Replaces old bidirectionalCheck and processExistingTasks functions.
+ * PHASE 3: Resolve parent_content, detect parent_tid changes.
  *
  * This function does EVERYTHING about task state reconciliation:
  * - Part 1: File → DB (check each task IN the file against DB)
  * - Part 2: DB → File (check each DB task for THIS filepath against file)
- * - Detects: moves, deletions, local changes
+ * - Part 3: PHASE 3 - Resolve parent_content → parent_tid, detect parent changes
+ * - Detects: moves, deletions, local changes, PARENT CHANGES
  * - Queues: files where moved tasks are found (for processing)
  * - Updates: DB state immediately (filepath, pending_changes)
  *
  * @param file - Current file being processed
- * @param existingTasks - Tasks with TIDs found in file (from initial parse)
+ * @param existingTasks - Tasks with TIDs found in file (with parent info from Phase 1)
+ * @param contentToTid - Map from Phase 2 (content → TID for new tasks)
  * @param vault - Obsidian vault
  * @param metadataCache - Metadata cache
  * @param db - Database instance
@@ -597,7 +1211,15 @@ async function resolveAndApplyUpdates(
  */
 async function reconcileFileTasks(
 	file: TFile,
-	existingTasks: Array<{ lineNum: number; line: string; tid: string | null }>,
+	existingTasks: Array<{
+		lineNum: number;
+		line: string;
+		tid: string | null;
+		parent_tid: string | null;
+		parent_content: string | null;
+	}>,
+	contentToTid: Map<string, string>,
+	newlyCreatedTIDs: Set<string>,
 	vault: Vault,
 	metadataCache: MetadataCache,
 	db: Database,
@@ -627,6 +1249,17 @@ async function reconcileFileTasks(
 			dbTask.filepath = file.path;  // Update DB filepath immediately
 		}
 
+		// PHASE 3: Resolve parent_content → parent_tid
+		let resolvedParentTid = task.parent_tid;  // Start with parent_tid from Phase 1
+
+		if (task.parent_content && !resolvedParentTid) {
+			// Parent is new task - look up in contentToTid map
+			resolvedParentTid = contentToTid.get(task.parent_content) || null;
+			if (!resolvedParentTid) {
+				console.warn(`Failed to resolve parent_content for task ${task.tid}: "${task.parent_content.substring(0, 40)}"`);
+			}
+		}
+
 		// Compare task content with DB - detect local changes
 		const currentTaskData = parseTaskLine(task.line);
 		if (!currentTaskData) {
@@ -634,7 +1267,8 @@ async function reconcileFileTasks(
 			continue;
 		}
 
-		// Check if any field changed
+		// Check if any field changed (including parent_tid!)
+		const parentChanged = resolvedParentTid !== (dbTask.parent_tid || null);
 		const contentChanged = currentTaskData.content !== dbTask.content;
 		const completedChanged = currentTaskData.completed !== dbTask.completed;
 		const dueDateChanged = currentTaskData.dueDate !== dbTask.dueDate;
@@ -643,9 +1277,9 @@ async function reconcileFileTasks(
 		const durationChanged = currentTaskData.duration !== dbTask.duration;
 		const labelsChanged = JSON.stringify(currentTaskData.labels) !== JSON.stringify(dbTask.labels);
 
-		if (contentChanged || completedChanged || dueDateChanged || dueDatetimeChanged || priorityChanged || durationChanged || labelsChanged) {
+		if (contentChanged || completedChanged || dueDateChanged || dueDatetimeChanged || priorityChanged || durationChanged || labelsChanged || parentChanged) {
 			// Local changes detected - add to pending_changes
-			console.log(`Local changes detected for task ${task.tid}`);
+			console.log(`Local changes detected for task ${task.tid}${parentChanged ? ' (parent changed)' : ''}`);
 			dbTask.pending_changes.push({
 				source: 'local',
 				timestamp: file.stat.mtime,  // Use file modification time
@@ -656,7 +1290,8 @@ async function reconcileFileTasks(
 					dueDatetime: currentTaskData.dueDatetime,
 					priority: currentTaskData.priority,
 					duration: currentTaskData.duration,
-					labels: currentTaskData.labels
+					labels: currentTaskData.labels,
+					parent_tid: resolvedParentTid  // NEW: Track parent changes
 				}
 			});
 		}
@@ -671,11 +1306,16 @@ async function reconcileFileTasks(
 	}
 
 	// Collect TIDs present in file for fast lookup
+	// Include both existing tasks AND newly created tasks from Phase 2
 	const tidsInFile = new Set<string>();
 	for (const task of existingTasks) {
 		if (task.tid) {
 			tidsInFile.add(task.tid);
 		}
+	}
+	// Add newly created tasks to prevent false deletion detection
+	for (const tid of newlyCreatedTIDs) {
+		tidsInFile.add(tid);
 	}
 
 	// Check each DB task - is it actually in the file?

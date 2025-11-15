@@ -64,6 +64,7 @@ export interface TaskInDB {
 	priority?: number;      // Priority (1-4, Todoist format)
 	duration?: number;      // Duration in minutes
 	labels: string[];       // All labels including tdsync
+	parent_tid?: string | null;    // Parent task ID (null/undefined = root task)
 
 	// Sync metadata
 	lastSyncedAt: number;  // Per-task sync timestamp
@@ -82,6 +83,7 @@ export interface TaskInDB {
 			priority?: number;
 			duration?: number;
 			labels?: string[];
+			parent_tid?: string | null;  // Parent changes tracked for conflict resolution
 		};
 	}>;
 }
@@ -128,6 +130,7 @@ export interface TodoistTask {
 	priority: number;
 	labels: string[];
 	project_id: string;
+	parent_id?: string;  // Parent task ID (null/undefined = root task)
 	duration?: {
 		amount: number;
 		unit: string;
@@ -136,7 +139,7 @@ export interface TodoistTask {
 
 // API command for batch operations
 export interface ApiCommand {
-	type: 'item_add' | 'item_update' | 'item_delete' | 'item_complete' | 'item_uncomplete';
+	type: 'item_add' | 'item_update' | 'item_delete' | 'item_complete' | 'item_uncomplete' | 'item_move';
 	temp_id?: string;
 	uuid: string;
 	args: {
@@ -145,6 +148,7 @@ export interface ApiCommand {
 		checked?: boolean;  // NOTE: NOT used in item_update! Completion requires item_complete/item_uncomplete commands
 		labels?: string[];
 		project_id?: string;
+		parent_id?: string | null;  // For item_add and item_move (null = root task)
 		due?: { date?: string; datetime?: string } | null;  // null to clear due date
 		priority?: number;
 		duration?: { amount: number; unit: string } | null;  // null to clear duration

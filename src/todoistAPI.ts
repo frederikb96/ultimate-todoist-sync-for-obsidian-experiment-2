@@ -171,6 +171,7 @@ export async function syncBatchCreate(
 		content: string;
 		labels: string[];
 		project_id?: string;
+		parent_id?: string;
 		due_date?: string;
 		due_datetime?: string;
 		priority?: number;
@@ -198,6 +199,11 @@ export async function syncBatchCreate(
 
 		if (task.project_id) {
 			args.project_id = task.project_id;
+		}
+
+		// Parent task support (null or undefined = root task)
+		if (task.parent_id) {
+			args.parent_id = task.parent_id;
 		}
 
 		// Due date handling (k-note lines 1382-1510)
@@ -417,6 +423,67 @@ export async function syncBatchDelete(
 		sync_token: response.sync_token,
 		full_sync: false,
 		items: []
+	};
+}
+
+/**
+ * Batch move multiple tasks (change parent).
+ * Uses item_move command which is separate from item_update.
+ *
+ * CRITICAL: item_update does NOT support changing parent_id!
+ * Must use item_move for parent changes.
+ *
+ * @param apiToken - Todoist API token
+ * @param moves - Array of moves (task_id and new parent_id, null = root)
+ * @returns SyncResponse with new sync_token
+ */
+export async function syncBatchMove(
+	apiToken: string,
+	moves: Array<{ id: string; parent_id: string | null; project_id?: string }>
+): Promise<SyncResponse> {
+	if (moves.length === 0) {
+		throw new Error('No moves to process');
+	}
+
+	if (moves.length > 100) {
+		throw new Error('Cannot move more than 100 tasks in single batch');
+	}
+
+	// Build commands array with item_move
+	// CRITICAL: Todoist API doesn't support parent_id: null!
+	// To move to root, use project_id instead of parent_id
+	const commands: ApiCommand[] = moves.map(move => {
+		const args: any = { id: move.id };
+
+		if (move.parent_id) {
+			// Moving to parent - use parent_id
+			args.parent_id = move.parent_id;
+		} else if (move.project_id) {
+			// Moving to root - use project_id (moves task to root of project)
+			args.project_id = move.project_id;
+		} else {
+			throw new Error(`Move for task ${move.id} has neither parent_id nor project_id`);
+		}
+
+		return {
+			type: 'item_move',
+			uuid: uuidv4(),
+			args
+		};
+	});
+
+	console.log('syncBatchMove: Processing', moves.length, 'moves');
+	console.log('syncBatchMove sending commands:', JSON.stringify(commands, null, 2));
+
+	const response = await todoistSyncRequest(apiToken, {
+		commands: JSON.stringify(commands),
+		resource_types: JSON.stringify(['items'])
+	});
+
+	return {
+		sync_token: response.sync_token,
+		full_sync: false,
+		items: response.items || []
 	};
 }
 

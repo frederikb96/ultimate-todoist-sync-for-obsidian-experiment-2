@@ -52,3 +52,55 @@ export function convertDurationToMinutes(duration: { amount: number; unit: strin
 	// Already in minutes
 	return duration.amount;
 }
+
+// Get indentation level from markdown line (2 spaces = 1 level, or 1 tab = 1 level)
+export function getIndentLevel(line: string): number {
+	const match = line.match(/^(\s*)/);
+	if (!match) return 0;
+
+	const whitespace = match[1];
+	// Count tabs as 1 level each, spaces as 1 level per 2 spaces
+	let level = 0;
+	for (const char of whitespace) {
+		if (char === '\t') {
+			level++;
+		} else if (char === ' ') {
+			// Count spaces (2 spaces = 1 level, handled after loop)
+		}
+	}
+
+	// Add space-based levels (2 spaces per level)
+	const spaces = whitespace.replace(/\t/g, '').length;
+	level += Math.floor(spaces / 2);
+
+	return level;
+}
+
+// Get indent unit from Obsidian's editor settings (tabs or spaces)
+// Returns "\t" for tabs, or "  "/"    " for spaces depending on user settings
+export function getIndentUnit(workspace: any): string {
+	try {
+		// Access current editor to read CodeMirror indent settings
+		const activeView = workspace.getActiveViewOfType(require('obsidian').MarkdownView);
+		if (activeView) {
+			const editorView = activeView.editor.cm;
+			if (editorView && editorView.state) {
+				// Import CodeMirror facets dynamically
+				const { indentUnit } = require('@codemirror/language');
+				const indent = editorView.state.facet(indentUnit);
+				return indent; // Returns "\t" or "  " or "    " etc.
+			}
+		}
+	} catch (error) {
+		// Silently fall through to default if CodeMirror access fails
+	}
+
+	// Fallback: use tab character as default (matches Obsidian's default)
+	return '\t';
+}
+
+// Build indentation prefix using Obsidian's indent settings
+// indentUnit: "\t" for tabs, "  " or "    " for spaces (get from getIndentUnit)
+export function buildIndent(level: number, indentUnit: string = '\t'): string {
+	return indentUnit.repeat(level);
+}

@@ -256,7 +256,8 @@ export async function pullFromTodoist(
 							dueDate: apiTask.due?.date,
 							dueDatetime: apiTask.due?.datetime,
 							priority: apiTask.priority,
-							duration: convertDurationToMinutes(apiTask.duration)  // Convert days to minutes
+							duration: convertDurationToMinutes(apiTask.duration),  // Convert days to minutes
+							parent_tid: apiTask.parent_id || null  // Parent relationship from API
 						}
 					});
 
