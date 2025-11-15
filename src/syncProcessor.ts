@@ -1278,6 +1278,17 @@ async function reconcileFileTasks(
 		const labelsChanged = JSON.stringify(currentTaskData.labels) !== JSON.stringify(dbTask.labels);
 
 		if (contentChanged || completedChanged || dueDateChanged || dueDatetimeChanged || priorityChanged || durationChanged || labelsChanged || parentChanged) {
+			// BUG FIX #6: Prevent CASCADE BUG where our own writes trigger false "local changes"
+			// Check if file was recently modified by OUR sync (within 5 seconds of lastSyncedAt)
+			// If yes, skip creating local pending_changes because WE wrote that state, not the user
+			const recentlyModifiedByUs = dbTask.lastSyncedAt &&
+										 Math.abs(file.stat.mtime - dbTask.lastSyncedAt) < 5000;  // 5 second window
+
+			if (recentlyModifiedByUs) {
+				console.log(`Skipping local pending_changes for ${task.tid} - file modified by recent sync (mtime: ${new Date(file.stat.mtime)}, lastSync: ${new Date(dbTask.lastSyncedAt)})`);
+				continue;
+			}
+
 			// Local changes detected - add to pending_changes
 			console.log(`Local changes detected for task ${task.tid}${parentChanged ? ' (parent changed)' : ''}`);
 			dbTask.pending_changes.push({
